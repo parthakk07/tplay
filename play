@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Start tplay. Creates the local virtualenv on the first run.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+if [[ ! -x .venv/bin/python ]]; then
+  python3 -m venv .venv
+  .venv/bin/pip install -r requirements.txt
+fi
+
+if ! command -v mpv >/dev/null 2>&1; then
+  echo "mpv is not installed. Install it first, for example:" >&2
+  echo "  sudo apt install mpv" >&2
+  exit 1
+fi
+
+exec .venv/bin/python -m tplay "$@"

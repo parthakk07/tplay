@@ -1,0 +1,19 @@
+[project]
+name = "tplay"
+version = "1.0.0"
+description = "Terminal player that streams music from YouTube"
+requires-python = ">=3.11"
+dependencies = [
+    "textual>=8.2,<9",
+    "yt-dlp>=2026.8.19",
+]
+
+[project.scripts]
+tplay = "tplay.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["tplay*"]
