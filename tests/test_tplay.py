@@ -478,6 +478,46 @@ async def test_shuffle_plays_each_song_once_then_stops(tmp_path: Path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_repeat_queue_starts_again_and_repeat_song_replays(tmp_path: Path) -> None:
+    player = FakePlayer()
+    app = _app(tmp_path, player=player)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _play_first(pilot, app)
+        app._on_mpv({"event": "start-file", "playlist_entry_id": 1})
+        app._on_mpv({"event": "playback-restart"})
+        await pilot.press("n")
+        await _settle(app, pilot)
+        await pilot.press("n")
+        await _settle(app, pilot)
+        assert app.queue_index == 2
+        await pilot.press("r")
+        await pilot.pause()
+        assert app.loop == "all"
+        assert "on" in app.query_one("#btn-loop").classes
+        await pilot.press("n")
+        await _settle(app, pilot)
+        assert app.queue_index == 0
+        assert app.current is not None
+        assert app.current.title == "Never Gonna Give You Up"
+        await pilot.press("r")
+        await pilot.pause()
+        assert app.loop == "one"
+        assert "1" in str(app.query_one("#btn-loop").render())
+        loads = len(player.loads)
+        app._on_mpv({"event": "start-file", "playlist_entry_id": 8})
+        app._on_mpv({"event": "playback-restart"})
+        app._on_mpv({"event": "end-file", "reason": "eof", "playlist_entry_id": 8})
+        await _settle(app, pilot)
+        assert app.queue_index == 0
+        assert app.current.title == "Never Gonna Give You Up"
+        assert len(player.loads) == loads + 1
+        await pilot.press("n")
+        await _settle(app, pilot)
+        assert app.queue_index == 1
+        assert app.current.title == "Bohemian Rhapsody"
+
+
+@pytest.mark.asyncio
 async def test_end_of_track_plays_the_next_song(tmp_path: Path) -> None:
     player = FakePlayer()
     app = _app(tmp_path, player=player)

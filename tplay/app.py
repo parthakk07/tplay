@@ -321,15 +321,6 @@ class TPlayApp(App[None]):
     #player-bottom {
         height: 1;
     }
-    #art {
-        width: 6;
-        height: 4;
-        margin: 0 1 0 0;
-        content-align: center middle;
-        text-style: bold;
-        background: #282828;
-        color: #b3b3b3;
-    }
     #player-meta {
         width: 1fr;
         height: 4;
@@ -347,7 +338,7 @@ class TPlayApp(App[None]):
         text-overflow: ellipsis;
     }
     #transport {
-        width: 20;
+        width: 24;
         height: 4;
         align: center middle;
     }
@@ -373,11 +364,11 @@ class TPlayApp(App[None]):
     .transport-btn.dim {
         color: #4d4d4d;
     }
-    #btn-shuffle {
+    #btn-shuffle, #btn-loop {
         width: 4;
         color: #6a6a6a;
     }
-    #btn-shuffle.on {
+    #btn-shuffle.on, #btn-loop.on {
         color: #1db954;
     }
     #volume-box {
@@ -436,6 +427,7 @@ class TPlayApp(App[None]):
         Binding("n", "next_track", "Next", show=False),
         Binding("p", "previous_track", "Previous", show=False),
         Binding("s", "toggle_shuffle", "Shuffle", show=False),
+        Binding("r", "toggle_loop", "Repeat", show=False),
         Binding("plus,equals,right_square_bracket", "volume_up", "Volume up", show=False),
         Binding("minus,left_square_bracket", "volume_down", "Volume down", show=False),
         Binding("m", "toggle_mute", "Mute", show=False),
@@ -468,6 +460,8 @@ class TPlayApp(App[None]):
         self.queue: list[Track] = []
         self.queue_index: int | None = None
         self.shuffle = False
+        self.loop = "off"
+        self._loop_label = "↻"
         self._order: list[int] = []
         self.current: Track | None = None
         self.loading = False
@@ -574,6 +568,21 @@ class TPlayApp(App[None]):
             self._paint_shuffle()
             if self.current is not None:
                 self._paint_up_next()
+            if self.player is not None:
+                self._paint_skip_buttons(self.player.snapshot())
+        except NoMatches:
+            return
+
+    def action_toggle_loop(self) -> None:
+        """Cycle off, then the whole queue, then the current song."""
+
+        order = ("off", "all", "one")
+        self.loop = order[(order.index(self.loop) + 1) % len(order)]
+        self.notify(
+            {"off": "Repeat off", "all": "Repeat queue", "one": "Repeat song"}[self.loop]
+        )
+        try:
+            self._paint_loop()
             if self.player is not None:
                 self._paint_skip_buttons(self.player.snapshot())
         except NoMatches:
@@ -699,6 +708,9 @@ class TPlayApp(App[None]):
             return
         self._entry_id = None
         if reason == "eof":
+            if self.loop == "one":
+                self._replay_current()
+                return
             self._advance(1, auto=True)
             return
         if reason == "error":
@@ -969,24 +981,48 @@ class TPlayApp(App[None]):
     def _has_next(self) -> bool:
         if self.queue_index is None or not self.queue:
             return False
+        if self.loop == "all":
+            return True
         nxt = self._neighbor(1)
         return 0 <= nxt < len(self.queue)
+
+    def _wrap_index(self, step: int) -> int:
+        """First song after the queue ends, or the last song before it starts."""
+
+        if self.shuffle:
+            self._ensure_order()
+            if step > 0:
+                self._build_order(None)
+                return self._order[0] if self._order else 0
+            return self._order[-1] if self._order else len(self.queue) - 1
+        if step > 0:
+            return 0
+        return len(self.queue) - 1
+
+    def _replay_current(self) -> None:
+        if self.queue_index is None or not self.queue:
+            return
+        self._begin_playback(self.queue[self.queue_index])
+        self._schedule_queue_refresh()
 
     def _advance(self, step: int, auto: bool) -> None:
         if self.queue_index is None or not self.queue:
             return
         nxt = self._neighbor(step)
-        if nxt < 0:
-            if self.player is not None:
-                self.player.seek_ratio(0)
-            return
-        if nxt >= len(self.queue):
-            self.loading = False
-            self._set_status("End of queue")
-            self._paint_identity()
-            if not auto:
-                self.notify("End of queue")
-            return
+        if nxt < 0 or nxt >= len(self.queue):
+            if self.loop == "all":
+                nxt = self._wrap_index(step)
+            elif nxt < 0:
+                if self.player is not None:
+                    self.player.seek_ratio(0)
+                return
+            else:
+                self.loading = False
+                self._set_status("End of queue")
+                self._paint_identity()
+                if not auto:
+                    self.notify("End of queue")
+                return
         self.queue_index = nxt
         self._begin_playback(self.queue[nxt])
         self._schedule_queue_refresh()
@@ -1019,14 +1055,12 @@ class TPlayApp(App[None]):
     def _paint_identity(self) -> None:
         title = self.query_one("#track-title", Static)
         artist = self.query_one("#track-artist", Static)
-        art = self.query_one("#art", Static)
         big = self.query_one("#big-art", Static)
         now_title = self.query_one("#now-title", Static)
         now_artist = self.query_one("#now-artist", Static)
         if self.current is None:
             title.update("Nothing playing")
             artist.update("Search for a song to start")
-            self._paint_cover(art, "♫", "#282828", "#ffffff")
             self._paint_cover(big, "♫", "#282828", "#ffffff")
             now_title.update("Nothing playing")
             now_artist.update("Search for a song and press enter")
@@ -1043,7 +1077,6 @@ class TPlayApp(App[None]):
             if self.queue_index is not None and self.queue:
                 position = f"   ·   {self.queue_index + 1} of {len(self.queue)}"
             artist.update(f"{track.artist}{position}")
-        self._paint_cover(art, letter, color, "#ffffff")
         self._paint_cover(big, letter, color, "#ffffff")
         now_title.update(track.title)
         now_artist.update(track.artist)
@@ -1105,13 +1138,22 @@ class TPlayApp(App[None]):
     def _paint_shuffle(self) -> None:
         self.query_one("#btn-shuffle").set_class(self.shuffle, "on")
 
+    def _paint_loop(self) -> None:
+        button = self.query_one("#btn-loop", Static)
+        button.set_class(self.loop != "off", "on")
+        label = "1" if self.loop == "one" else "↻"
+        if label != self._loop_label:
+            self._loop_label = label
+            button.update(label)
+
     def _paint_skip_buttons(self, snapshot: PlaybackSnapshot) -> None:
-        has_prev = self._neighbor(-1) >= 0 or bool(
+        has_prev = self.loop == "all" or self._neighbor(-1) >= 0 or bool(
             snapshot.position and snapshot.position > 3 and self.current is not None
         )
         self.query_one("#btn-prev").set_class(not has_prev, "dim")
         self.query_one("#btn-next").set_class(not self._has_next(), "dim")
         self._paint_shuffle()
+        self._paint_loop()
 
     def _paint_volume(self) -> None:
         bar = self.query_one("#volume-bar", VolumeBar)

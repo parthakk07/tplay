@@ -172,6 +172,7 @@ Keyboard                                          esc closes
   space          play or pause
   n / p          next / previous
   s              shuffle
+  r              repeat queue, then the song
   left / right   seek 10 seconds
   shift+arrows   seek 30 seconds
   + / -          volume
@@ -387,7 +388,6 @@ class PlayerBar(Vertical):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="player-top"):
-            yield Static("♫", id="art", markup=False)
             with Vertical(id="player-meta"):
                 yield Static("Nothing playing", id="track-title", markup=False)
                 yield Static("Search for a song to start", id="track-artist", markup=False)
@@ -396,6 +396,7 @@ class PlayerBar(Vertical):
                 yield ActionLabel("⏮", "previous_track", id="btn-prev", classes="transport-btn")
                 yield ActionLabel("▶", "toggle_pause", id="btn-play", classes="transport-btn play")
                 yield ActionLabel("⏭", "next_track", id="btn-next", classes="transport-btn")
+                yield ActionLabel("↻", "toggle_loop", id="btn-loop", classes="transport-btn")
             yield VolumeBox(id="volume-box")
         with Horizontal(id="player-bottom"):
             yield Static("0:00", id="time-pos", markup=False)

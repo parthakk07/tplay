@@ -42,6 +42,7 @@ Quit with `ctrl+c`.
 | space | play or pause |
 | `n` / `p` | next / previous |
 | `s` | shuffle |
+| `r` | repeat the queue, then the current song |
 | left / right | seek 10 seconds |
 | shift+arrows | seek 30 seconds |
 | `+` / `-` | volume |
@@ -51,7 +52,7 @@ Quit with `ctrl+c`.
 | `?` | shortcuts |
 | ctrl+c | quit |
 
-Click a row to play it. Click the progress bar to seek. Scroll or click the volume bar to change volume. Shuffle is the `⇄` button. It turns green while it is on.
+Click a row to play it. Click the progress bar to seek. Scroll or click the volume bar to change volume. Shuffle is the `⇄` button. Repeat is `↻`. Both turn green while they are on. Press repeat again and the button shows `1`, which replays the current song.
 
 ## Run without installing the command
 
