@@ -730,14 +730,43 @@ async def test_missing_mpv_opens_the_app_and_explains(tmp_path: Path, monkeypatc
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         assert isinstance(app.player, DeadPlayer)
-        assert "mpv is not installed" in str(app.query_one("#status").content)
+        status = app.query_one("#status")
+        shown = str(status.content)
+        command = mpv_install_hint()
+        assert "mpv is not installed" in shown
+        assert command in shown
         assert "Install it with:" in app.player.message
+        assert status.size.width > 0
+        assert status.size.height >= 2
+        lines = status.render().wrap(status.size.width)
+        assert lines
+        assert all(line.cell_length <= status.size.width for line in lines)
+        assert command in "".join(line.plain for line in lines)
         await _search(pilot, app, "queen")
         await pilot.press("enter")
         await pilot.pause()
         assert app.current is not None
         assert app.current.title == "Never Gonna Give You Up"
         assert "mpv is not installed" in str(app.query_one("#status").content)
+
+
+@pytest.mark.asyncio
+async def test_missing_mpv_message_wraps_to_the_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("tplay.player.find_mpv", lambda: None)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("tplay.player.shutil.which", lambda name: name if name == "pacman" else None)
+    app = TPlayApp(source=FakeSource(), player=None, config_path=tmp_path / "state.json")
+    async with app.run_test(size=(52, 24)) as pilot:
+        await pilot.pause()
+        status = app.query_one("#status")
+        command = "sudo pacman -Sy --noconfirm mpv"
+        assert command in str(status.content)
+        width = status.size.width
+        assert 0 < width < len(command)
+        lines = status.render().wrap(width)
+        assert all(line.cell_length <= width for line in lines)
+        assert command in " ".join(line.plain.strip() for line in lines)
+        assert status.size.height >= len(lines)
 
 
 def test_ipc_address_follows_the_platform(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -752,6 +781,26 @@ def test_ipc_address_follows_the_platform(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(sys, "platform", "linux")
     assert ipc_server(12).endswith("tplay-12.sock")
     assert "apt install mpv" in mpv_install_hint()
+
+
+def test_mpv_hint_follows_the_package_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    def present(*names: str):
+        allowed = set(names)
+        return lambda name: name if name in allowed else None
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("tplay.player.shutil.which", present("apt-get", "dnf"))
+    assert mpv_install_hint() == "sudo apt install mpv"
+    monkeypatch.setattr("tplay.player.shutil.which", present("dnf"))
+    assert mpv_install_hint() == "sudo dnf install -y mpv"
+    monkeypatch.setattr("tplay.player.shutil.which", present("pacman"))
+    assert mpv_install_hint() == "sudo pacman -Sy --noconfirm mpv"
+    monkeypatch.setattr("tplay.player.shutil.which", present())
+    assert mpv_install_hint() == "sudo apt install mpv"
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert mpv_install_hint() == "brew install mpv"
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert mpv_install_hint() == "winget install --exact --id shinchiro.mpv"
 
 
 @pytest.mark.asyncio
@@ -772,11 +821,18 @@ async def test_control_boxes_are_ascii_and_clickable(tmp_path: Path) -> None:
         assert app.queue_index == 1
         await pilot.click("#btn-shuffle")
         assert app.shuffle is True
+        assert app.query_one("#btn-shuffle").styles.background.hex.lower() == "#1db954"
         await pilot.click("#btn-loop")
         assert app.loop == "all"
+        assert "↻" in str(app.query_one("#btn-loop").render())
+        assert app.query_one("#btn-loop").styles.background.hex.lower() == "#1db954"
         await pilot.click("#btn-loop")
         assert app.loop == "one"
         assert "1" in str(app.query_one("#btn-loop").render())
+        assert app.query_one("#btn-loop").styles.background.hex.lower() == "#1db954"
+        await pilot.click("#btn-loop")
+        assert app.loop == "off"
+        assert app.query_one("#btn-loop").styles.background.a == 0
         await pilot.click("#btn-vol-up")
         await pilot.pause()
         assert app.volume == 85

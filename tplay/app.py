@@ -166,9 +166,12 @@ class TPlayApp(App[None]):
         color: #000000;
     }
     #status {
-        height: 1;
+        height: auto;
+        min-height: 1;
+        max-height: 8;
         color: #b3b3b3;
-        text-overflow: ellipsis;
+        text-wrap: wrap;
+        text-overflow: fold;
     }
     #status.error {
         color: #ff6b6b;
@@ -385,9 +388,16 @@ class TPlayApp(App[None]):
     #btn-shuffle, #btn-loop {
         width: 4;
         color: #6a6a6a;
+        background: transparent;
     }
     #btn-shuffle.on, #btn-loop.on {
-        color: #1db954;
+        background: #1db954;
+        color: #000000;
+        text-style: bold;
+    }
+    #btn-shuffle.on:hover, #btn-loop.on:hover {
+        background: #1ed760;
+        color: #000000;
     }
     #volume-box {
         width: 22;
@@ -582,7 +592,6 @@ class TPlayApp(App[None]):
             self._build_order(self.queue_index)
         else:
             self._order = []
-        self.notify("Shuffle on" if self.shuffle else "Shuffle off")
         try:
             self._paint_shuffle()
             if self.current is not None:
@@ -597,9 +606,6 @@ class TPlayApp(App[None]):
 
         order = ("off", "all", "one")
         self.loop = order[(order.index(self.loop) + 1) % len(order)]
-        self.notify(
-            {"off": "Repeat off", "all": "Repeat queue", "one": "Repeat song"}[self.loop]
-        )
         try:
             self._paint_loop()
             if self.player is not None:
@@ -709,7 +715,9 @@ class TPlayApp(App[None]):
                 self.player = MpvPlayer(on_event=self._from_mpv, volume=self.volume)
                 self.player.start()
             except Exception as exc:
-                message = short_error(exc)
+                message = str(exc).strip() or exc.__class__.__name__
+                if "\n" not in message:
+                    message = short_error(exc)
                 self.player = DeadPlayer(message)
                 self._set_status(message, error=True)
                 self.call_after_refresh(self.notify, message, severity="error", timeout=12)

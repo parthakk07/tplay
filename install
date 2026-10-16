@@ -108,6 +108,12 @@ install_mpv() {
     echo "mpv is not installed. tplay will still open and show this command:" >&2
     if [[ "${os}" == "Darwin" ]]; then
       echo "  brew install mpv" >&2
+    elif have apt-get || have apt; then
+      echo "  sudo apt install mpv" >&2
+    elif have dnf; then
+      echo "  sudo dnf install -y mpv" >&2
+    elif have pacman; then
+      echo "  sudo pacman -Sy --noconfirm mpv" >&2
     else
       echo "  sudo apt install mpv" >&2
     fi

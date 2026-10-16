@@ -26,19 +26,35 @@ class PlayerError(Exception):
 
 
 def mpv_install_hint() -> str:
-    """Command that installs mpv on this operating system."""
+    """Command that installs mpv for this system.
+
+    These match the install script: winget, Homebrew, apt, dnf, then pacman.
+    """
 
     if sys.platform == "win32":
         return "winget install --exact --id shinchiro.mpv"
     if sys.platform == "darwin":
         return "brew install mpv"
+    if shutil.which("apt-get") or shutil.which("apt"):
+        return "sudo apt install mpv"
+    if shutil.which("dnf"):
+        return "sudo dnf install -y mpv"
+    if shutil.which("pacman"):
+        return "sudo pacman -Sy --noconfirm mpv"
     return "sudo apt install mpv"
 
 
 def mpv_missing_message() -> str:
-    """What to show when audio cannot start. This is not a crash."""
+    """What to show when audio cannot start. This is not a crash.
 
-    return f"mpv is not installed, so audio cannot play. Install it with: {mpv_install_hint()}"
+    The command is on its own line so a narrow terminal can wrap it whole.
+    """
+
+    return (
+        "mpv is not installed, so audio cannot play.\n"
+        "Install it with:\n"
+        f"{mpv_install_hint()}"
+    )
 
 
 def _mpv_candidates() -> list[str]:
