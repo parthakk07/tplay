@@ -15,10 +15,10 @@ A Spotify playlist plays those songs from YouTube.
 
   tplay
 
-First time, one command.
+Install or update with one command.
 
   Linux and macOS:
-    bash -c "$(curl -fsSL https://raw.githubusercontent.com/parthakk07/tplay/main/install)"
+    curl -fsSL https://raw.githubusercontent.com/parthakk07/tplay/main/install | bash
 
   Windows (PowerShell):
     irm https://raw.githubusercontent.com/parthakk07/tplay/main/install.ps1 | iex

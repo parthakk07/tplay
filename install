@@ -1,23 +1,189 @@
 #!/usr/bin/env bash
-# One command: install anything missing, then open tplay.
+# Install tplay, or update it when the command on PATH is the pipx copy.
 # Linux and macOS. Windows uses install.ps1.
+# A copy this installer does not recognize is left in place.
 set -euo pipefail
 
 export PATH="${HOME}/.local/bin:${PATH}"
 
-os="$(uname -s)"
-case "${os}" in
-  MINGW*|MSYS*|CYGWIN*)
-    echo "On Windows, open PowerShell and run:" >&2
-    echo "  irm https://raw.githubusercontent.com/parthakk07/tplay/main/install.ps1 | iex" >&2
-    exit 1
-    ;;
-  Darwin|Linux) ;;
-  *)
-    echo "This installer supports Linux, macOS, and Windows (PowerShell)." >&2
-    exit 1
-    ;;
-esac
+# BEGIN TPLAY_PIPX_CHECK
+TPLAY_PIPX_CHECK=$(cat <<'PY'
+import json
+import os
+import sys
+
+
+def emit(kind, *fields):
+    print("\t".join([kind, *fields]))
+
+
+def resolve(path):
+    if not path:
+        return ""
+    try:
+        return os.path.realpath(path)
+    except OSError:
+        return os.path.abspath(path)
+
+
+def norm(path):
+    value = resolve(path)
+    if os.name == "nt":
+        return os.path.normcase(value)
+    return value
+
+
+def app_paths(main):
+    found = []
+    for item in main.get("app_paths") or []:
+        if isinstance(item, str) and item:
+            found.append(item)
+        elif isinstance(item, dict):
+            value = item.get("__Path__") or ""
+            if value:
+                found.append(value)
+    return found
+
+
+def venv_from_app(path):
+    parent = os.path.dirname(resolve(path))
+    if os.path.basename(parent).lower() in {"bin", "scripts"}:
+        return os.path.dirname(parent)
+    return ""
+
+
+def basename_is_tplay(path):
+    return os.path.basename(path).lower() in {"tplay", "tplay.exe"}
+
+
+def inside(child, parent):
+    if not child or not parent:
+        return False
+    child = norm(child)
+    parent = norm(parent)
+    if child == parent:
+        return True
+    return child.startswith(parent.rstrip("\\/") + os.sep)
+
+
+def mentions(path, needle):
+    if not path or not needle or not os.path.isfile(path):
+        return False
+    variants = {needle, needle.replace("/", "\\"), needle.replace("\\", "/")}
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(8_000_000)
+    except OSError:
+        return False
+    for item in variants:
+        if not item:
+            continue
+        if item.encode("utf-8", "surrogateescape") in data:
+            return True
+        if item.encode("utf-16le", "surrogateescape") in data:
+            return True
+    return False
+
+
+def is_tplay_env(name, env):
+    main = ((env or {}).get("metadata") or {}).get("main_package") or {}
+    apps = [str(item).lower() for item in (main.get("apps") or [])]
+    package = str(main.get("package") or "").lower()
+    if name.lower() == "tplay":
+        return True
+    if "tplay" in apps or "tplay.exe" in apps:
+        return True
+    return package == "tplay"
+
+
+def main():
+    if len(sys.argv) != 4:
+        emit("unclear", "", "bad-args")
+        return
+    command, bin_dir, venvs_root = sys.argv[1:]
+    if not command:
+        emit("absent")
+        return
+    try:
+        data = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        emit("unclear", command, "invalid-json")
+        return
+    if not isinstance(data, dict):
+        emit("unclear", command, "invalid-json")
+        return
+    venvs = data.get("venvs")
+    if not isinstance(venvs, dict):
+        emit("unclear", command, "invalid-json")
+        return
+    candidates = []
+    for name, env in venvs.items():
+        if not isinstance(name, str) or not is_tplay_env(name, env if isinstance(env, dict) else {}):
+            continue
+        main = ((env or {}).get("metadata") or {}).get("main_package") or {}
+        if not isinstance(main, dict):
+            main = {}
+        paths = app_paths(main)
+        venv_dir = ""
+        for path in paths:
+            venv_dir = venv_from_app(path)
+            if venv_dir:
+                break
+        if not venv_dir and venvs_root:
+            guess = os.path.join(venvs_root, name)
+            owns_guess = inside(command, guess) or any(inside(path, guess) for path in paths)
+            if os.path.isdir(guess) and owns_guess:
+                venv_dir = guess
+        candidates.append((paths, venv_dir))
+    if not candidates:
+        emit("unknown", command, "not-listed")
+        return
+    matches = []
+    for paths, venv_dir in candidates:
+        matched = any(norm(command) == norm(path) for path in paths)
+        if not matched and venv_dir and inside(command, venv_dir) and basename_is_tplay(command):
+            matched = True
+        copy_in_bin = (
+            bin_dir
+            and venv_dir
+            and norm(os.path.dirname(os.path.abspath(command))) == norm(bin_dir)
+            and basename_is_tplay(command)
+        )
+        if not matched and copy_in_bin and mentions(command, venv_dir):
+            matched = True
+        if matched:
+            matches.append(venv_dir)
+    if len(matches) > 1:
+        emit("unclear", command, "ambiguous")
+        return
+    if len(matches) == 1:
+        venv_dir = matches[0]
+        if not venv_dir or not os.path.isdir(venv_dir):
+            emit("unclear", command, "no-venv-dir")
+            return
+        emit("managed", command, venv_dir)
+        return
+    shown = ""
+    for paths, venv_dir in candidates:
+        if paths:
+            shown = paths[0]
+            break
+        if venv_dir:
+            shown = venv_dir
+            break
+    emit("unclear", command, "different-path", shown)
+
+
+if __name__ == "__main__":
+    main()
+PY
+)
+# END TPLAY_PIPX_CHECK
+
+REPO_URL="git+https://github.com/parthakk07/tplay.git"
+BACKUP=""
+VENVS_ROOT=""
+BIN_DIR=""
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -120,30 +286,306 @@ install_mpv() {
   fi
 }
 
-case "${os}" in
-  Darwin) install_mac ;;
-  Linux) install_linux ;;
-esac
-install_mpv
-
-if ! have tplay; then
-  here=""
-  src="${BASH_SOURCE[0]:-}"
+intended_source() {
+  local src="${BASH_SOURCE[0]:-}"
+  local here=""
   if [[ -n "${src}" && -f "${src}" ]]; then
     here="$(cd "$(dirname "${src}")" && pwd)"
   fi
   if [[ -n "${here}" && -f "${here}/pyproject.toml" ]]; then
-    pipx install --force --editable "${here}"
+    printf '%s\n' "editable" "${here}"
   else
-    pipx install --force "git+https://github.com/parthakk07/tplay.git"
+    printf '%s\n' "git" "${REPO_URL}"
+  fi
+}
+
+abs_dir() {
+  python3 -c 'import os, sys; print(os.path.realpath(os.path.dirname(os.path.abspath(sys.argv[1]))))' "$1"
+}
+
+abs_path() {
+  python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
+}
+
+classify_tplay() {
+  local cmd="" json="" err=""
+  cmd="$(command -v tplay 2>/dev/null || true)"
+  if [[ -z "${cmd}" ]]; then
+    printf 'absent\n'
+    return 0
+  fi
+  if ! have pipx; then
+    printf 'unclear\t%s\tpipx-missing\n' "${cmd}"
+    return 0
+  fi
+  err="$(mktemp)"
+  if ! json="$(pipx list --json 2>"${err}")"; then
+    echo "pipx list failed, so tplay was not changed:" >&2
+    cat "${err}" >&2 || true
+    rm -f "${err}"
+    printf 'unclear\t%s\tlist-failed\n' "${cmd}"
+    return 0
+  fi
+  rm -f "${err}"
+  BIN_DIR="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || true)"
+  VENVS_ROOT="$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)"
+  if ! printf '%s' "${json}" | python3 -c "${TPLAY_PIPX_CHECK}" "${cmd}" "${BIN_DIR}" "${VENVS_ROOT}"; then
+    printf 'unclear\t%s\tcheck-failed\n' "${cmd}"
+  fi
+}
+
+venv_target_is_safe() {
+  local venv="$1" expected="" actual=""
+  [[ -n "${VENVS_ROOT}" && -n "${venv}" ]] || return 1
+  expected="$(abs_path "${VENVS_ROOT}/tplay")"
+  actual="$(abs_path "${venv}")"
+  [[ "${actual}" == "${expected}" ]]
+}
+
+venv_is_safe() {
+  local venv="$1"
+  [[ -d "${venv}" ]] || return 1
+  venv_target_is_safe "${venv}"
+}
+
+shim_is_safe() {
+  local shim="$1" base="" shim_dir="" expected=""
+  base="$(basename "${shim}")"
+  [[ "${base}" == "tplay" || "${base}" == "tplay.exe" ]] || return 1
+  [[ -n "${BIN_DIR}" ]] || return 1
+  shim_dir="$(abs_dir "${shim}")"
+  expected="$(abs_path "${BIN_DIR}")"
+  [[ "${shim_dir}" == "${expected}" ]]
+}
+
+backup_managed() {
+  local venv="$1" shim=""
+  BACKUP="$(mktemp -d "${TMPDIR:-/tmp}/tplay-install.XXXXXX")"
+  if ! cp -a "${venv}" "${BACKUP}/venv"; then
+    echo "Could not back up the existing tplay install. Nothing was changed." >&2
+    rm -rf "${BACKUP}"
+    BACKUP=""
+    return 1
+  fi
+  if [[ -n "${BIN_DIR}" ]]; then
+    shim="${BIN_DIR}/tplay"
+    if [[ -e "${shim}" || -L "${shim}" ]] && shim_is_safe "${shim}"; then
+      mkdir -p "${BACKUP}/shimdir"
+      cp -a "${shim}" "${BACKUP}/shimdir/tplay"
+      printf '%s\n' "${shim}" > "${BACKUP}/shim_path"
+    fi
+  fi
+}
+
+restore_managed() {
+  local venv="$1" broken="" shim=""
+  if [[ -z "${BACKUP}" || ! -d "${BACKUP}/venv" ]]; then
+    echo "Could not restore tplay because the backup is missing." >&2
+    return 1
+  fi
+  if ! venv_target_is_safe "${venv}"; then
+    echo "Refusing to restore ${venv} because it is outside the pipx venv directory." >&2
+    return 1
+  fi
+  broken="${venv}.broken-update"
+  rm -rf "${broken}"
+  if [[ -d "${venv}" ]] && ! mv "${venv}" "${broken}"; then
+    echo "Could not move the failed tplay install aside. The backup is in ${BACKUP}." >&2
+    return 1
+  fi
+  if ! mv "${BACKUP}/venv" "${venv}"; then
+    if [[ -d "${broken}" && ! -d "${venv}" ]]; then
+      mv "${broken}" "${venv}" || true
+    fi
+    echo "Could not restore the previous tplay install. The backup is in ${BACKUP}." >&2
+    return 1
+  fi
+  rm -rf "${broken}"
+  if [[ -f "${BACKUP}/shim_path" ]]; then
+    shim="$(cat "${BACKUP}/shim_path")"
+    if shim_is_safe "${shim}"; then
+      rm -f "${shim}"
+      cp -a "${BACKUP}/shimdir/tplay" "${shim}"
+    else
+      echo "The previous tplay command was not put back at ${shim}." >&2
+      return 1
+    fi
+  fi
+}
+
+clear_backup() {
+  if [[ -n "${BACKUP}" && -d "${BACKUP}" ]]; then
+    rm -rf "${BACKUP}"
+  fi
+  BACKUP=""
+}
+
+pipx_install() {
+  local mode="$1" spec="$2"
+  if [[ "${mode}" == "editable" ]]; then
+    pipx install --force --editable "${spec}"
+  else
+    pipx install --force "${spec}"
+  fi
+}
+
+leave_alone() {
+  local kind="$1" cmd="$2" reason="$3" extra="${4:-}"
+  case "${reason}" in
+    not-listed)
+      printf '%s\n' \
+        "tplay is already installed at: ${cmd}" \
+        "That copy is not managed by pipx, so it was left unchanged." \
+        "Settings in ~/.config/tplay were not changed." \
+        "" \
+        "Next steps:" \
+        "  Uninstall that copy the same way it was installed." \
+        "  Open a new terminal and make sure the tplay command is gone." \
+        "  Run this installer again." >&2
+      ;;
+    different-path)
+      printf '%s\n' \
+        "tplay on PATH is: ${cmd}" \
+        "pipx has a different tplay at: ${extra:-unknown}" \
+        "Neither copy was changed. Settings in ~/.config/tplay were not changed." \
+        "" \
+        "Next steps:" \
+        "  This installer only updates the tplay command that pipx exposes." \
+        "  Remove the other tplay from PATH, or uninstall it the way it was installed." \
+        "  Run this installer again." >&2
+      ;;
+    pipx-missing)
+      printf '%s\n' \
+        "tplay is already installed at: ${cmd}" \
+        "pipx is not available, so this installer cannot tell whether pipx owns that copy." \
+        "Nothing was changed. Settings in ~/.config/tplay were not changed." \
+        "" \
+        "Next steps:" \
+        "  Install pipx, run 'pipx list', and then run this installer again." \
+        "  If tplay came from another tool, uninstall that copy first." >&2
+      ;;
+    list-failed)
+      printf '%s\n' \
+        "tplay is already installed at: ${cmd}" \
+        "pipx list failed, so this installer cannot tell whether pipx owns that copy." \
+        "Nothing was changed. Settings in ~/.config/tplay were not changed." \
+        "" \
+        "Next steps:" \
+        "  Fix 'pipx list', then run this installer again." \
+        "  If tplay came from another tool, uninstall that copy first." >&2
+      ;;
+    *)
+      printf '%s\n' \
+        "tplay is already installed at: ${cmd}" \
+        "This installer could not tell whether it is safe to update (${reason})." \
+        "Nothing was changed. Settings in ~/.config/tplay were not changed." \
+        "" \
+        "Next steps:" \
+        "  Run 'pipx list' and then run this installer again." \
+        "  If tplay came from another tool, uninstall that copy first." >&2
+      ;;
+  esac
+  exit 1
+}
+
+install_fresh() {
+  local mode="$1" spec="$2" status=0 cmd=""
+  echo "Installing tplay..." >&2
+  pipx_install "${mode}" "${spec}" || status=$?
+  if [[ "${status}" -ne 0 ]]; then
+    echo "Could not install tplay." >&2
+    exit "${status}"
   fi
   pipx ensurepath >/dev/null 2>&1 || true
   export PATH="${HOME}/.local/bin:${PATH}"
-fi
+  hash -r
+  cmd="$(command -v tplay 2>/dev/null || true)"
+  if [[ -z "${cmd}" ]]; then
+    echo "Could not install tplay. The tplay command is still missing." >&2
+    exit 1
+  fi
+  if ! "${cmd}" --help >/dev/null; then
+    echo "tplay was installed but failed its check, so it was not started." >&2
+    exit 1
+  fi
+  echo "Installed tplay." >&2
+  exec "${cmd}"
+}
 
-if ! have tplay; then
-  echo "tplay is installed. Open a new terminal and type: tplay" >&2
-  exit 1
-fi
+update_managed() {
+  local mode="$1" spec="$2" venv="$3" cmd="$4" status=0
+  echo "Updating the pipx installation of tplay..." >&2
+  if ! backup_managed "${venv}"; then
+    exit 1
+  fi
+  pipx_install "${mode}" "${spec}" || status=$?
+  if [[ "${status}" -ne 0 ]]; then
+    echo "Updating tplay failed. The previous installation is still in place." >&2
+    restore_managed "${venv}" || exit 1
+    clear_backup
+    exit "${status}"
+  fi
+  hash -r
+  if ! "${cmd}" --help >/dev/null; then
+    echo "The updated tplay failed its check. The previous installation was restored." >&2
+    restore_managed "${venv}" || exit 1
+    clear_backup
+    exit 1
+  fi
+  clear_backup
+  echo "Updated tplay." >&2
+  exec "${cmd}"
+}
 
-exec tplay
+main() {
+  local os="" mode="" spec="" result="" kind="" cmd="" field3="" field4=""
+  os="$(uname -s)"
+  case "${os}" in
+    MINGW*|MSYS*|CYGWIN*)
+      echo "On Windows, open PowerShell and run:" >&2
+      echo "  irm https://raw.githubusercontent.com/parthakk07/tplay/main/install.ps1 | iex" >&2
+      exit 1
+      ;;
+    Darwin|Linux) ;;
+    *)
+      echo "This installer supports Linux, macOS, and Windows (PowerShell)." >&2
+      exit 1
+      ;;
+  esac
+
+  case "${os}" in
+    Darwin) install_mac ;;
+    Linux) install_linux ;;
+  esac
+  install_mpv
+
+  source_lines="$(intended_source)"
+  mode="$(printf '%s\n' "${source_lines}" | sed -n '1p')"
+  spec="$(printf '%s\n' "${source_lines}" | sed -n '2p')"
+  # A function redirect keeps PIPX path globals. Command substitution would not.
+  result_file="$(mktemp)"
+  classify_tplay >"${result_file}"
+  result="$(cat "${result_file}")"
+  rm -f "${result_file}"
+  IFS=$'\t' read -r kind cmd field3 field4 <<<"${result}"
+  case "${kind}" in
+    absent)
+      install_fresh "${mode}" "${spec}"
+      ;;
+    managed)
+      if ! venv_is_safe "${field3}"; then
+        leave_alone "unclear" "${cmd}" "outside-pipx-home" "${field3}"
+      fi
+      update_managed "${mode}" "${spec}" "${field3}" "${cmd}"
+      ;;
+    unknown|unclear)
+      leave_alone "${kind}" "${cmd}" "${field3}" "${field4}"
+      ;;
+    *)
+      echo "Could not decide how tplay is installed. Nothing was changed." >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
