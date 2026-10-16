@@ -117,6 +117,7 @@ class TPlayApp(App[None]):
         height: 1fr;
         margin: 1 0 0 0;
         padding: 0 1 1 2;
+        content-align: left bottom;
         color: #8a8a8a;
         overflow-y: auto;
         scrollbar-color: #6a6a6a;

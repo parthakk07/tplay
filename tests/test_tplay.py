@@ -751,6 +751,31 @@ def _write_tone(path: Path, seconds: float = 1.2) -> None:
         handle.writeframes(bytes(data))
 
 
+def _visible_lines(widget) -> list[tuple[int, str]]:
+    lines = []
+    for y in range(widget.size.height):
+        text = "".join(segment.text for segment in widget.render_line(y)).strip()
+        if text:
+            lines.append((y, text))
+    return lines
+
+
+@pytest.mark.asyncio
+async def test_shortcut_list_sits_at_the_bottom_left(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    async with app.run_test(size=(100, 36)) as pilot:
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar")
+        keys = app.query_one("#sidebar-keys")
+        assert keys.region.x == 0
+        assert keys.region.bottom == sidebar.region.bottom
+        lines = _visible_lines(keys)
+        assert lines[0][1].startswith("/ search")
+        assert lines[0][0] > 0
+        assert "ctrl+c" in lines[-1][1]
+        assert lines[-1][0] == keys.size.height - 1
+
+
 @pytest.mark.asyncio
 async def test_recommendations_play_and_sidebar_lists_every_shortcut(tmp_path: Path) -> None:
     player = FakePlayer()
