@@ -6,11 +6,27 @@ A Spotify playlist plays those songs from YouTube (up to 50). A YouTube playlist
 
 ## Install
 
-One command. It installs what is missing, then opens the player. The first time, it may ask for your password.
+One command. It installs what is missing, then opens the player.
+
+### Linux and macOS
+
+The first time, it may ask for your password. On a Mac, [Homebrew](https://brew.sh) has to be installed first.
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/parthakk07/tplay/main/install)"
 ```
+
+### Windows
+
+Open PowerShell and run:
+
+```powershell
+irm https://raw.githubusercontent.com/parthakk07/tplay/main/install.ps1 | iex
+```
+
+The first time, Windows may ask you to approve the installers.
+
+If mpv is missing, tplay still opens. The screen shows the command that installs it, and nothing crashes. Audio starts after mpv is installed.
 
 After that, start it from any terminal with:
 

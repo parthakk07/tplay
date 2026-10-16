@@ -26,6 +26,7 @@ from tplay.widgets import (
     SearchView,
     SeekBar,
     Sidebar,
+    RECOMMENDED,
     TrackItem,
     VolumeBar,
 )
@@ -83,13 +84,13 @@ class TPlayApp(App[None]):
         padding: 1 0 0 0;
     }
     #logo {
-        height: 2;
+        height: 1;
         padding: 0 2;
         text-style: bold;
-        content-align: left bottom;
+        content-align: left middle;
     }
     #tagline {
-        height: 2;
+        height: 1;
         padding: 0 2;
         color: #6a6a6a;
     }
@@ -111,13 +112,20 @@ class TPlayApp(App[None]):
         color: #ffffff;
         background: #121212;
     }
-    #sidebar-gap {
-        height: 1fr;
-    }
     #sidebar-keys {
-        height: 6;
-        padding: 0 2 1 2;
-        color: #5c5c5c;
+        height: 1fr;
+        margin: 1 0 0 0;
+        padding: 0 1 1 2;
+        color: #8a8a8a;
+        overflow-y: auto;
+        scrollbar-color: #6a6a6a;
+        scrollbar-color-hover: #b3b3b3;
+        scrollbar-color-active: #ffffff;
+        scrollbar-background: #000000;
+        scrollbar-background-hover: #000000;
+        scrollbar-background-active: #000000;
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 0;
     }
     #main {
         width: 1fr;
@@ -170,14 +178,24 @@ class TPlayApp(App[None]):
         color: #6a6a6a;
         margin: 1 0 0 0;
     }
-    #results, #queue-list, #empty-search, #empty-queue {
+    #recommend-label {
+        display: none;
+        height: 1;
+        margin: 1 0 0 0;
+        color: #ffffff;
+        text-style: bold;
+    }
+    #recommend-label.show {
+        display: block;
+    }
+    #results, #queue-list, #recommendations, #empty-queue {
         display: none;
         height: 1fr;
     }
-    #results.show, #queue-list.show, #empty-search.show, #empty-queue.show {
+    #results.show, #queue-list.show, #recommendations.show, #empty-queue.show {
         display: block;
     }
-    #empty-search, #empty-queue {
+    #empty-queue {
         color: #b3b3b3;
         content-align: center middle;
         text-align: center;
@@ -487,6 +505,7 @@ class TPlayApp(App[None]):
         self._paint_identity()
         self._paint_volume()
         self._update_empty_states()
+        self.call_later(self._mount_recommendations)
         self.set_interval(0.25, self._tick)
         self.query_one("#search-input", Input).focus()
 
@@ -605,6 +624,9 @@ class TPlayApp(App[None]):
         track = self._highlighted_track()
         if track is None:
             return
+        if classify_query(track.query) != "search":
+            self._start_search(track.query)
+            return
         self.queue.append(track)
         added = len(self.queue) - 1
         self.notify(f"Added to queue: {track.title[:80]}")
@@ -638,8 +660,26 @@ class TPlayApp(App[None]):
             return
         if event.list_view.id == "results":
             self.play_at(self.results, event.index)
+        elif event.list_view.id == "recommendations":
+            self._open_recommendation(event.item.track)
         elif event.list_view.id == "queue-list":
             self.play_at(list(self.queue), event.index)
+
+    def _open_recommendation(self, track: Track) -> None:
+        """Play a recommended song, or queue a recommended playlist."""
+
+        if classify_query(track.query) != "search":
+            self._start_search(track.query)
+            return
+        songs = self._recommended_songs()
+        try:
+            index = songs.index(track)
+        except ValueError:
+            return
+        self.play_at(songs, index)
+
+    def _recommended_songs(self) -> list[Track]:
+        return [item for item in RECOMMENDED if classify_query(item.query) == "search"]
 
     def on_seek_bar_sought(self, event: SeekBar.Sought) -> None:
         event.stop()
@@ -672,6 +712,7 @@ class TPlayApp(App[None]):
                 message = short_error(exc)
                 self.player = DeadPlayer(message)
                 self._set_status(message, error=True)
+                self.call_after_refresh(self.notify, message, severity="error", timeout=12)
                 return
         else:
             self.player.start()
@@ -876,6 +917,7 @@ class TPlayApp(App[None]):
         if isinstance(self.player, DeadPlayer):
             self.loading = False
             self._set_status(self.player.message, error=True)
+            self.notify(self.player.message, severity="error", timeout=8)
             try:
                 self._paint_identity()
                 self._mark_playing()
@@ -1122,7 +1164,7 @@ class TPlayApp(App[None]):
             format_duration(duration) if active else "--:--"
         )
 
-    def _paint_play_button(self, snapshot: PlayerSnapshot) -> None:
+    def _paint_play_button(self, snapshot: PlaybackSnapshot) -> None:
         playing = (
             self.current is not None
             and not self.loading
@@ -1218,18 +1260,43 @@ class TPlayApp(App[None]):
         return None
 
     def _mark_playing(self) -> None:
-        current_id = self.current.video_id if self.current else None
         for item in self.query(TrackItem):
-            item.set_playing(item.track.video_id == current_id)
+            item.set_playing(self._same_track(item.track))
 
     def _update_empty_states(self) -> None:
-        self.query_one("#results").set_class(bool(self.results), "show")
-        self.query_one("#empty-search").set_class(not self.results, "show")
+        show_results = bool(self.results)
+        self.query_one("#results").set_class(show_results, "show")
+        self.query_one("#recommendations").set_class(not show_results, "show")
+        self.query_one("#recommend-label").set_class(not show_results, "show")
         self.query_one("#queue-list").set_class(bool(self.queue), "show")
         self.query_one("#empty-queue").set_class(not self.queue, "show")
 
+    def _same_track(self, track: Track) -> bool:
+        current = self.current
+        if current is None:
+            return False
+        if current.video_id and track.video_id:
+            return track.video_id == current.video_id
+        return (
+            track.title == current.title
+            and track.artist == current.artist
+            and track.query == current.query
+        )
+
     def _schedule_queue_refresh(self) -> None:
         self.call_later(self._mount_queue_list)
+
+    async def _mount_recommendations(self) -> None:
+        async with self._ui_lock:
+            view = self.query_one("#recommendations", ListView)
+            await view.clear()
+            items = [
+                TrackItem(track, index + 1, playing=self._same_track(track))
+                for index, track in enumerate(RECOMMENDED)
+            ]
+            if items:
+                await view.extend(items)
+            self._update_empty_states()
 
     async def _mount_queue_list(self) -> None:
         await self._mount_tracks("#queue-list", self.queue)
@@ -1242,9 +1309,8 @@ class TPlayApp(App[None]):
         async with self._ui_lock:
             view = self.query_one(list_id, ListView)
             await view.clear()
-            current_id = self.current.video_id if self.current else None
             items = [
-                TrackItem(track, index + 1, playing=track.video_id == current_id)
+                TrackItem(track, index + 1, playing=self._same_track(track))
                 for index, track in enumerate(tracks)
             ]
             if items:

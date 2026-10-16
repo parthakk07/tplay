@@ -8,10 +8,4 @@ if [[ ! -x .venv/bin/python ]]; then
   .venv/bin/pip install -r requirements.txt
 fi
 
-if ! command -v mpv >/dev/null 2>&1; then
-  echo "mpv is not installed. Install it first, for example:" >&2
-  echo "  sudo apt install mpv" >&2
-  exit 1
-fi
-
 exec .venv/bin/python -m tplay "$@"

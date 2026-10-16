@@ -151,16 +151,30 @@ class SmoothList(_GlideScroll, ListView):
 class SmoothPane(_GlideScroll, Vertical):
     """A vertical pane whose wheel scroll glides."""
 
-EMPTY_SEARCH = (
-    "Type a song or artist and press enter.\n"
-    "Paste a YouTube or Spotify playlist link to queue it.\n"
-    "\n"
-    "Audio streams from YouTube. Nothing is saved.\n"
-    "A Spotify playlist plays those songs from YouTube.\n"
-    "\n"
-    "/  search        enter  play        a  queue\n"
-    "space  pause     + -  volume       ?  shortcuts"
+# Shown on the search page before anyone types. A song row has an empty video
+# id and is resolved with a YouTube search. A playlist row stores the link in
+# query and is opened through the normal playlist collector.
+RECOMMENDED: tuple[Track, ...] = (
+    Track("", "Never Gonna Give You Up", "Rick Astley", 213, "Rick Astley - Never Gonna Give You Up"),
+    Track("", "Bohemian Rhapsody", "Queen", 355, "Queen - Bohemian Rhapsody"),
+    Track("", "Blinding Lights", "The Weeknd", 200, "The Weeknd - Blinding Lights"),
+    Track("", "Levitating", "Dua Lipa", 203, "Dua Lipa - Levitating"),
+    Track("", "As It Was", "Harry Styles", 167, "Harry Styles - As It Was"),
+    Track("", "Sweater Weather", "The Neighbourhood", 240, "The Neighbourhood - Sweater Weather"),
+    Track("", "Today's Top Hits", "Playlist · Spotify", None, "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"),
+    Track("", "RapCaviar", "Playlist · Spotify", None, "https://open.spotify.com/playlist/37i9dQZF1DX0XUsuxWHRQd"),
+    Track("", "Peaceful Piano", "Playlist · Spotify", None, "https://open.spotify.com/playlist/37i9dQZF1DX4sWSpwq3LiO"),
 )
+
+SIDEBAR_KEYS = """\
+/ search     enter play
+a queue      space pause
+n next       p previous
+s shuffle    r repeat
+arrows 10s   shift 30s
++ - volume   m mute
+1 2 3 pages  j k move
+? help       ctrl+c quit"""
 
 HELP_TEXT = """\
 Keyboard                                          esc closes
@@ -322,12 +336,7 @@ class Sidebar(Vertical):
         yield ActionLabel("1   ⌕   Search", "show_search", id="nav-search", classes="nav active")
         yield ActionLabel("2   ≡   Queue", "show_queue", id="nav-queue", classes="nav")
         yield ActionLabel("3   ♪   Now playing", "show_now", id="nav-now", classes="nav")
-        yield Static("", id="sidebar-gap")
-        yield Static(
-            "space  play / pause\n+ -    volume\n/      search\n?      shortcuts",
-            id="sidebar-keys",
-            markup=False,
-        )
+        yield Static(SIDEBAR_KEYS, id="sidebar-keys", markup=False)
 
 
 class SearchView(Vertical):
@@ -342,8 +351,9 @@ class SearchView(Vertical):
             select_on_focus=False,
         )
         yield Static("", id="status", markup=False)
+        yield Static("Recommended", id="recommend-label", classes="show", markup=False)
+        yield SmoothList(id="recommendations", classes="show")
         yield SmoothList(id="results")
-        yield Static(EMPTY_SEARCH, id="empty-search", classes="show", markup=False)
 
 
 class QueueView(Vertical):

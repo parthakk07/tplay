@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import shutil
 import sys
 
-USAGE = """\
-tplay — terminal music player
+from tplay.player import mpv_install_hint
+
+USAGE = f"""\
+tplay - terminal music player
 
 Search, or paste a YouTube or Spotify playlist link.
 Audio streams from YouTube and nothing is saved.
@@ -14,11 +15,16 @@ A Spotify playlist plays those songs from YouTube.
 
   tplay
 
-First time, one command:
-  bash -c "$(curl -fsSL https://raw.githubusercontent.com/parthakk07/tplay/main/install)"
+First time, one command.
 
-mpv has to be installed (the program that plays the audio):
-  sudo apt install mpv
+  Linux and macOS:
+    bash -c "$(curl -fsSL https://raw.githubusercontent.com/parthakk07/tplay/main/install)"
+
+  Windows (PowerShell):
+    irm https://raw.githubusercontent.com/parthakk07/tplay/main/install.ps1 | iex
+
+If mpv is missing, tplay still opens and shows how to install it:
+  {mpv_install_hint()}
 
 Inside the app: / search, enter play, + - volume, space pause, ? shortcuts.
 """
@@ -33,10 +39,6 @@ def main() -> None:
         print("tplay takes no arguments.\n", file=sys.stderr)
         print(USAGE, file=sys.stderr)
         raise SystemExit(2)
-    if shutil.which("mpv") is None:
-        print("mpv is not installed. Install it first, for example:", file=sys.stderr)
-        print("  sudo apt install mpv", file=sys.stderr)
-        raise SystemExit(1)
     from tplay.app import TPlayApp
 
     TPlayApp().run()

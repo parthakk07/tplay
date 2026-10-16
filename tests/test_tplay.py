@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import math
+import os
 import shutil
+import signal
 import struct
+import subprocess
+import sys
 import time
 import wave
 from pathlib import Path
@@ -13,7 +17,19 @@ import pytest
 
 from tplay.app import TPlayApp
 from tplay.models import Stream, Track, clean_artist, format_duration
-from tplay.player import MpvPlayer, PlaybackSnapshot
+from tplay.player import (
+    DeadPlayer,
+    MpvPlayer,
+    PlaybackSnapshot,
+    PlayerError,
+    find_mpv,
+    forget_player_process,
+    ipc_server,
+    mpv_install_hint,
+    popen_kwargs,
+    stop_tracked_player,
+    track_player_process,
+)
 from tplay.source import (
     SourceError,
     YouTubeSource,
@@ -22,7 +38,7 @@ from tplay.source import (
     tracks_from_info,
     tracks_from_spotify_html,
 )
-from tplay.widgets import HelpScreen, ThinScrollBarRender, TrackItem
+from tplay.widgets import RECOMMENDED, HelpScreen, ThinScrollBarRender, TrackItem
 
 SAMPLE = [
     Track("dQw4w9WgXcQ", "Never Gonna Give You Up", "Rick Astley", 213),
@@ -285,7 +301,7 @@ async def test_search_play_volume_and_queue(tmp_path: Path) -> None:
         assert "tplay" in str(app.query_one("#logo").content)
         await _search(pilot, app, "queen")
         assert source.queries == ["queen"]
-        assert [item.track.title for item in app.query(TrackItem)] == [track.title for track in SAMPLE]
+        assert [item.track.title for item in app.query("#results TrackItem")] == [track.title for track in SAMPLE]
         assert "streamed, nothing saved" in str(app.query_one("#status").content)
 
         await pilot.press("enter")
@@ -652,6 +668,290 @@ def _write_tone(path: Path, seconds: float = 1.2) -> None:
             sample = int(8000 * math.sin(2 * math.pi * 440 * index / rate))
             data += struct.pack("<h", sample)
         handle.writeframes(bytes(data))
+
+
+@pytest.mark.asyncio
+async def test_recommendations_play_and_sidebar_lists_every_shortcut(tmp_path: Path) -> None:
+    player = FakePlayer()
+    source = FakeSource()
+    app = _app(tmp_path, source=source, player=player)
+    songs = [track for track in RECOMMENDED if classify_query(track.query) == "search"]
+    playlists = [track for track in RECOMMENDED if classify_query(track.query) != "search"]
+    async with app.run_test(size=(80, 24)) as pilot:
+        for _ in range(10):
+            await pilot.pause()
+            if app.query("#recommendations TrackItem"):
+                break
+        items = list(app.query("#recommendations TrackItem"))
+        assert [item.track.title for item in items] == [track.title for track in RECOMMENDED]
+        assert [item.track.artist for item in items if item.track in playlists] == ["Playlist · Spotify"] * len(playlists)
+        assert songs and playlists
+        assert "show" in app.query_one("#recommendations").classes
+        keys = str(app.query_one("#sidebar-keys").render())
+        for shortcut in ("search", "play", "queue", "pause", "next", "previous", "shuffle", "repeat", "volume", "mute", "ctrl+c"):
+            assert shortcut in keys
+        await pilot.click(items[0])
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert player.loads
+        assert app.current is not None
+        assert app.current.title == songs[0].title
+        assert [track.title for track in app.queue] == [track.title for track in songs]
+        playlist = playlists[0]
+        playlist_row = next(item for item in items if item.track == playlist)
+        playlist_row.scroll_visible(animate=False)
+        await pilot.pause()
+        await pilot.click(playlist_row)
+        await _settle(app, pilot)
+        assert source.links[-1] == (playlist.query, "playlist")
+        assert app.current.title == songs[0].title
+        assert [track.title for track in app.queue] == [track.title for track in songs] + [track.title for track in SAMPLE]
+        assert "visible" in app.query_one("#view-queue").classes
+        await pilot.press("1")
+        await _search(pilot, app, "queen")
+        assert "show" not in app.query_one("#recommendations").classes
+        assert "show" in app.query_one("#results").classes
+
+
+def test_find_mpv_checks_a_normal_install_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    binary = tmp_path / "mpv"
+    binary.write_text("", encoding="utf-8")
+    monkeypatch.setattr("tplay.player.shutil.which", lambda _name: None)
+    monkeypatch.setattr("tplay.player._mpv_candidates", lambda: [str(binary)])
+    assert find_mpv() == str(binary)
+    monkeypatch.setattr("tplay.player._mpv_candidates", lambda: [])
+    assert find_mpv() is None
+
+
+@pytest.mark.asyncio
+async def test_missing_mpv_opens_the_app_and_explains(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("tplay.player.find_mpv", lambda: None)
+    app = TPlayApp(source=FakeSource(), player=None, config_path=tmp_path / "state.json")
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert isinstance(app.player, DeadPlayer)
+        assert "mpv is not installed" in str(app.query_one("#status").content)
+        assert "Install it with:" in app.player.message
+        await _search(pilot, app, "queen")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.current is not None
+        assert app.current.title == "Never Gonna Give You Up"
+        assert "mpv is not installed" in str(app.query_one("#status").content)
+
+
+def test_ipc_address_follows_the_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert ipc_server(12) == r"\\.\pipe\tplay-12"
+    assert popen_kwargs() == {"creationflags": 0x00000200 | 0x08000000}
+    assert "winget" in mpv_install_hint()
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert ipc_server(12).endswith("tplay-12.sock")
+    assert popen_kwargs() == {"start_new_session": True}
+    assert mpv_install_hint() == "brew install mpv"
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert ipc_server(12).endswith("tplay-12.sock")
+    assert "apt install mpv" in mpv_install_hint()
+
+
+@pytest.mark.asyncio
+async def test_control_boxes_are_ascii_and_clickable(tmp_path: Path) -> None:
+    player = FakePlayer()
+    app = _app(tmp_path, player=player)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _play_first(pilot, app)
+        app._on_mpv({"event": "start-file", "playlist_entry_id": 1})
+        app._on_mpv({"event": "playback-restart"})
+        app._tick()
+        await pilot.pause()
+        assert "❚❚" in str(app.query_one("#btn-play").render())
+        assert "⇄" in str(app.query_one("#btn-shuffle").render())
+        assert "↻" in str(app.query_one("#btn-loop").render())
+        await pilot.click("#btn-next")
+        await _settle(app, pilot)
+        assert app.queue_index == 1
+        await pilot.click("#btn-shuffle")
+        assert app.shuffle is True
+        await pilot.click("#btn-loop")
+        assert app.loop == "all"
+        await pilot.click("#btn-loop")
+        assert app.loop == "one"
+        assert "1" in str(app.query_one("#btn-loop").render())
+        await pilot.click("#btn-vol-up")
+        await pilot.pause()
+        assert app.volume == 85
+        await pilot.click("#volume-bar", offset=(0, 0))
+        await pilot.pause()
+        assert app.volume == 0
+        await pilot.click("#seek-bar", offset=(10, 0))
+        await pilot.pause()
+        assert player.position > 0
+        await pilot.click("#nav-queue")
+        await pilot.pause()
+        assert "visible" in app.query_one("#view-queue").classes
+        for widget_id in ("#btn-shuffle", "#btn-play", "#btn-loop", "#volume-bar", "#seek-bar"):
+            region = app.query_one(widget_id).region
+            assert region.width > 0 and region.height > 0
+
+
+def test_mpv_is_tied_to_this_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_popen(cmd: list[str], **kwargs: object) -> None:
+        seen["cmd"] = cmd
+        seen["kwargs"] = kwargs
+        raise OSError("stop")
+
+    monkeypatch.setattr("tplay.player.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("tplay.player.find_mpv", lambda: "/usr/bin/mpv")
+    player = MpvPlayer(audio_output="null")
+    with pytest.raises(PlayerError):
+        player.start()
+    command = seen["cmd"]
+    kwargs = seen["kwargs"]
+    assert isinstance(command, list)
+    assert isinstance(kwargs, dict)
+    assert "preexec_fn" not in kwargs
+    if sys.platform == "linux":
+        assert "prctl" in "\n".join(str(part) for part in command)
+    else:
+        assert command[0] == "/usr/bin/mpv"
+    assert player.log_tail() == ""
+
+
+def _process_state(pid: int) -> str:
+    result = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip()
+
+
+def _wait_until_stopped(pid: int, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = _process_state(pid)
+        if not state or state.startswith("Z"):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _run_linger(tmp_path: Path, body: str) -> tuple[subprocess.Popen[bytes], Path, Path]:
+    script = tmp_path / "linger.py"
+    script.write_text(body, encoding="utf-8")
+    err = tmp_path / "linger.err"
+    err_handle = err.open("w", encoding="utf-8")
+    env = os.environ.copy()
+    root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = root + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.DEVNULL,
+        stderr=err_handle,
+        env=env,
+    )
+    err_handle.close()
+    return proc, tmp_path / "child.pid", err
+
+
+def _child_pid(path: Path, parent: subprocess.Popen[bytes], err: Path) -> int:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if path.exists() and path.read_text(encoding="utf-8").strip():
+            return int(path.read_text(encoding="utf-8").strip())
+        if parent.poll() is not None:
+            detail = err.read_text(encoding="utf-8", errors="replace")
+            raise AssertionError(f"helper exited {parent.returncode}: {detail}")
+        time.sleep(0.05)
+    detail = err.read_text(encoding="utf-8", errors="replace")
+    raise AssertionError(f"helper did not start the player: {detail}")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="terminal hangup is a unix signal")
+def test_hangup_stops_playback(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+    parent, pid_path, err = _run_linger(
+        tmp_path,
+        "import time\n"
+        "from tplay.player import popen_kwargs, track_player_process\n"
+        "import subprocess\n"
+        "child = subprocess.Popen(['sleep', '120'], **popen_kwargs())\n"
+        "track_player_process(child.pid)\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "while child.poll() is None:\n"
+        "    time.sleep(0.1)\n",
+    )
+    child_pid = 0
+    try:
+        child_pid = _child_pid(pid_path, parent, err)
+        os.kill(parent.pid, signal.SIGHUP)
+        parent.wait(timeout=5)
+        assert _wait_until_stopped(child_pid)
+    finally:
+        if child_pid:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except OSError:
+                pass
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=2)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="parent-death signal is Linux")
+def test_parent_death_stops_playback(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+    parent, pid_path, err = _run_linger(
+        tmp_path,
+        "import time\n"
+        "import subprocess\n"
+        "import os\n"
+        "from tplay.player import popen_kwargs, tie_to_parent\n"
+        "child = subprocess.Popen(tie_to_parent(['sleep', '120']), **popen_kwargs())\n"
+        "deadline = time.monotonic() + 5\n"
+        "while time.monotonic() < deadline:\n"
+        "    try:\n"
+        "        exe = os.readlink(f'/proc/{child.pid}/exe')\n"
+        "    except OSError:\n"
+        "        exe = ''\n"
+        "    if exe.endswith('sleep'):\n"
+        "        break\n"
+        "    time.sleep(0.02)\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "while True:\n"
+        "    time.sleep(0.2)\n",
+    )
+    child_pid = 0
+    try:
+        child_pid = _child_pid(pid_path, parent, err)
+        os.kill(parent.pid, signal.SIGKILL)
+        parent.wait(timeout=5)
+        assert _wait_until_stopped(child_pid)
+    finally:
+        if child_pid:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except OSError:
+                pass
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=2)
+
+
+def test_stop_tracked_player_kills_only_the_player() -> None:
+    proc = subprocess.Popen(["sleep", "120"], **popen_kwargs())
+    try:
+        track_player_process(proc.pid)
+        stop_tracked_player()
+        assert _wait_until_stopped(proc.pid)
+        forget_player_process(proc.pid)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
 
 
 @pytest.mark.skipif(shutil.which("mpv") is None, reason="mpv is not installed")

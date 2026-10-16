@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import atexit
+import ctypes
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 from collections.abc import Callable
@@ -19,6 +23,214 @@ from tplay.models import Stream
 
 class PlayerError(Exception):
     """mpv could not be started or controlled."""
+
+
+def mpv_install_hint() -> str:
+    """Command that installs mpv on this operating system."""
+
+    if sys.platform == "win32":
+        return "winget install --exact --id shinchiro.mpv"
+    if sys.platform == "darwin":
+        return "brew install mpv"
+    return "sudo apt install mpv"
+
+
+def mpv_missing_message() -> str:
+    """What to show when audio cannot start. This is not a crash."""
+
+    return f"mpv is not installed, so audio cannot play. Install it with: {mpv_install_hint()}"
+
+
+def _mpv_candidates() -> list[str]:
+    """Places mpv is often installed when it was left off PATH."""
+
+    home = Path.home()
+    if sys.platform == "win32":
+        program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+        local = os.environ.get("LOCALAPPDATA", str(home / "AppData" / "Local"))
+        chocolatey = os.environ.get("ChocolateyInstall", r"C:\ProgramData\chocolatey")
+        paths = [
+            Path(program_files) / "mpv" / "mpv.exe",
+            Path(program_files_x86) / "mpv" / "mpv.exe",
+            Path(local) / "Programs" / "mpv" / "mpv.exe",
+            Path(local) / "mpv" / "mpv.exe",
+            Path(local) / "Microsoft" / "WinGet" / "Links" / "mpv.exe",
+            home / "scoop" / "shims" / "mpv.exe",
+            home / "scoop" / "apps" / "mpv" / "current" / "mpv.exe",
+            Path(chocolatey) / "bin" / "mpv.exe",
+        ]
+        return [str(path) for path in paths]
+    if sys.platform == "darwin":
+        return [
+            "/opt/homebrew/bin/mpv",
+            "/usr/local/bin/mpv",
+            str(home / "homebrew" / "bin" / "mpv"),
+            "/Applications/mpv.app/Contents/MacOS/mpv",
+            str(home / "Applications" / "mpv.app" / "Contents" / "MacOS" / "mpv"),
+        ]
+    return [
+        "/usr/bin/mpv",
+        "/usr/local/bin/mpv",
+        str(home / ".local" / "bin" / "mpv"),
+        "/snap/bin/mpv",
+        str(home / ".nix-profile" / "bin" / "mpv"),
+    ]
+
+
+def find_mpv() -> str | None:
+    """mpv on PATH, or a copy in a normal install folder."""
+
+    found = shutil.which("mpv")
+    if found:
+        return found
+    for candidate in _mpv_candidates():
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def ipc_server(pid: int) -> str:
+    """Address mpv should listen on. A named pipe on Windows, a socket elsewhere."""
+
+    if sys.platform == "win32":
+        return rf"\\.\pipe\tplay-{pid}"
+    return str(Path(tempfile.gettempdir()) / f"tplay-{pid}.sock")
+
+
+def popen_kwargs() -> dict[str, int | bool]:
+    """Keep mpv out of this terminal's process group, on every platform."""
+
+    if sys.platform == "win32":
+        # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW. Numeric so this file
+        # still imports on Linux, where those names are missing.
+        return {"creationflags": 0x00000200 | 0x08000000}
+    return {"start_new_session": True}
+
+
+# mpv's pid while it should die with this process. None once it has exited.
+_tracked_pid: int | None = None
+_cleanup_installed = False
+_win_close_handler: object | None = None
+
+# A fresh interpreter sets this, then replaces itself with mpv. Doing it in
+# the forked child is unsafe once the UI has other threads. The setting
+# survives exec, so mpv still exits when tplay does. PR_SET_PDEATHSIG is 1.
+_PARENT_DEATH = """\
+import ctypes, os, signal, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+libc.prctl.restype = ctypes.c_int
+libc.prctl(1, int(signal.SIGTERM), 0, 0, 0)
+if os.getppid() == 1:
+    os.kill(os.getpid(), signal.SIGTERM)
+os.execvp(sys.argv[1], sys.argv[1:])
+"""
+
+
+def tie_to_parent(command: list[str]) -> list[str]:
+    """On Linux, make this program exit when tplay exits.
+
+    Closing a terminal signals tplay, not mpv, because mpv has its own session.
+    """
+
+    if sys.platform != "linux":
+        return list(command)
+    return [sys.executable, "-c", _PARENT_DEATH, *command]
+
+
+def track_player_process(pid: int) -> None:
+    """Remember the player so a closed terminal can stop it."""
+
+    global _tracked_pid
+    _tracked_pid = pid
+    _install_terminal_cleanup()
+
+
+def forget_player_process(pid: int) -> None:
+    """The player has exited. Do not signal that pid again."""
+
+    global _tracked_pid
+    if _tracked_pid == pid:
+        _tracked_pid = None
+
+
+def stop_tracked_player() -> None:
+    """Stop the player process immediately. Safe to call more than once."""
+
+    global _tracked_pid
+    pid = _tracked_pid
+    _tracked_pid = None
+    if not pid or pid <= 0:
+        return
+    if sys.platform == "win32":
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            return
+
+
+def _on_terminal_closed(signum: int, _frame: object) -> None:
+    """A closed terminal delivers SIGHUP. Stop audio, then exit."""
+
+    stop_tracked_player()
+    try:
+        signal.signal(signum, signal.SIG_DFL)
+    except (OSError, ValueError):
+        os._exit(128 + signum)
+    os.kill(os.getpid(), signum)
+    os._exit(128 + signum)
+
+
+def _install_windows_close_handler() -> None:
+    """Stop audio when the console window closes. Windows only."""
+
+    global _win_close_handler
+    if _win_close_handler is not None:
+        return
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handler_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+    def _handler(ctrl_type: int) -> bool:
+        # CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT.
+        if ctrl_type in (2, 5, 6):
+            stop_tracked_player()
+        return False
+
+    _win_close_handler = handler_type(_handler)
+    kernel32.SetConsoleCtrlHandler.argtypes = [handler_type, wintypes.BOOL]
+    kernel32.SetConsoleCtrlHandler.restype = wintypes.BOOL
+    if not kernel32.SetConsoleCtrlHandler(_win_close_handler, True):
+        _win_close_handler = None
+
+
+def _install_terminal_cleanup() -> None:
+    global _cleanup_installed
+    if _cleanup_installed:
+        return
+    _cleanup_installed = True
+    atexit.register(stop_tracked_player)
+    if sys.platform == "win32":
+        try:
+            _install_windows_close_handler()
+        except (AttributeError, OSError):
+            return
+        return
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        try:
+            signal.signal(sig, _on_terminal_closed)
+        except (OSError, ValueError):
+            continue
 
 
 @dataclass
@@ -83,7 +295,7 @@ class MpvPlayer:
         self._volume = max(0, min(100, int(volume)))
         self._audio_output = audio_output
         self._proc: subprocess.Popen[bytes] | None = None
-        self._sock: socket.socket | None = None
+        self._ipc: _Ipc | None = None
         self._thread: threading.Thread | None = None
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
@@ -92,25 +304,26 @@ class MpvPlayer:
         self._closed = False
         self._started = False
         pid = os.getpid()
-        self.socket_path = Path(tempfile.gettempdir()) / f"tplay-{pid}.sock"
+        self.ipc_name = ipc_server(pid)
         self._log_path = Path(tempfile.gettempdir()) / f"tplay-{pid}.log"
         self._log_file: Any = None
 
     def start(self) -> None:
         if self._started:
             return
-        if shutil.which("mpv") is None:
-            raise PlayerError("mpv is not installed. Install it with: sudo apt install mpv")
-        self.socket_path.unlink(missing_ok=True)
+        mpv = find_mpv()
+        if mpv is None:
+            raise PlayerError(mpv_missing_message())
+        _clear_ipc_name(self.ipc_name)
         self._log_file = open(self._log_path, "w", encoding="utf-8")
         command = [
-            "mpv",
+            mpv,
             "--idle=yes",
             "--no-video",
             "--no-terminal",
             "--force-window=no",
             "--input-default-bindings=no",
-            f"--input-ipc-server={self.socket_path}",
+            f"--input-ipc-server={self.ipc_name}",
             f"--volume={self._volume}",
             "--volume-max=100",
             "--ytdl=no",
@@ -124,11 +337,12 @@ class MpvPlayer:
             command.append(f"--ao={self._audio_output}")
         try:
             self._proc = subprocess.Popen(
-                command,
+                tie_to_parent(command),
                 stdout=subprocess.DEVNULL,
                 stderr=self._log_file,
-                start_new_session=True,
+                **popen_kwargs(),
             )
+            track_player_process(self._proc.pid)
         except OSError as exc:
             self.shutdown()
             raise PlayerError(f"Could not start mpv: {exc}") from exc
@@ -161,15 +375,15 @@ class MpvPlayer:
                 proc.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
                 self._kill_proc()
-        self._close_sock()
+        if proc is not None and proc.poll() is not None:
+            forget_player_process(proc.pid)
+        self._close_ipc()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=1.0)
+        self._release_ipc()
         self._close_log()
-        try:
-            self.socket_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _clear_ipc_name(self.ipc_name)
 
     def stop(self) -> None:
         """Stop the current file so a skip cannot be confused with it ending."""
@@ -236,16 +450,19 @@ class MpvPlayer:
         while _now() < deadline:
             if self._proc is not None and self._proc.poll() is not None:
                 break
-            if self.socket_path.exists():
-                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                try:
-                    sock.connect(str(self.socket_path))
-                except OSError as exc:
-                    last_error = str(exc)
-                    sock.close()
-                else:
-                    self._sock = sock
-                    return
+            if sys.platform != "win32" and not Path(self.ipc_name).exists():
+                _sleep(0.05)
+                continue
+            ipc = _open_ipc()
+            try:
+                ipc.connect(self.ipc_name)
+            except OSError as exc:
+                last_error = str(exc)
+                ipc.close()
+                ipc.release()
+            else:
+                self._ipc = ipc
+                return
             _sleep(0.05)
         detail = last_error or self.log_tail() or "timed out waiting for mpv"
         raise PlayerError(detail)
@@ -256,13 +473,13 @@ class MpvPlayer:
             self._send(["observe_property", index, name])
 
     def _read_loop(self) -> None:
-        sock = self._sock
-        if sock is None:
+        ipc = self._ipc
+        if ipc is None:
             return
         buffer = b""
         while not self._closed:
             try:
-                chunk = sock.recv(65536)
+                chunk = ipc.recv()
             except OSError:
                 break
             if not chunk:
@@ -320,19 +537,26 @@ class MpvPlayer:
                 self._snapshot.idle = bool(data)
 
     def _send(self, command: list[object]) -> None:
-        sock = self._sock
-        if sock is None:
+        ipc = self._ipc
+        if ipc is None:
             return
         payload = json.dumps({"command": command}, ensure_ascii=False) + "\n"
         with self._write_lock:
             try:
-                sock.sendall(payload.encode("utf-8"))
+                ipc.sendall(payload.encode("utf-8"))
             except OSError:
                 return
 
     def _kill_proc(self) -> None:
         proc = self._proc
         if proc is None or proc.poll() is not None:
+            return
+        if sys.platform == "win32":
+            proc.terminate()
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
             return
         try:
             os.killpg(proc.pid, 15)
@@ -350,7 +574,73 @@ class MpvPlayer:
             except subprocess.TimeoutExpired:
                 return
 
-    def _close_sock(self) -> None:
+    def _close_ipc(self) -> None:
+        ipc = self._ipc
+        if ipc is None:
+            return
+        ipc.close()
+
+    def _release_ipc(self) -> None:
+        ipc = self._ipc
+        self._ipc = None
+        if ipc is None:
+            return
+        ipc.release()
+
+    def _close_log(self) -> None:
+        log_file = self._log_file
+        self._log_file = None
+        if log_file is None:
+            return
+        try:
+            log_file.close()
+        except OSError:
+            pass
+
+
+class _Ipc:
+    def connect(self, name: str) -> None:
+        raise NotImplementedError
+
+    def recv(self) -> bytes:
+        raise NotImplementedError
+
+    def sendall(self, payload: bytes) -> None:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        return None
+
+    def release(self) -> None:
+        return None
+
+
+class _UnixIpc(_Ipc):
+    def __init__(self) -> None:
+        self._sock: socket.socket | None = None
+
+    def connect(self, name: str) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(name)
+        except OSError:
+            sock.close()
+            raise
+        self._sock = sock
+
+    def recv(self) -> bytes:
+        sock = self._sock
+        if sock is None:
+            return b""
+        return sock.recv(65536)
+
+    def sendall(self, payload: bytes) -> None:
+        sock = self._sock
+        if sock is None or not payload:
+            return
+        sock.sendall(payload)
+
+    def close(self) -> None:
         sock = self._sock
         self._sock = None
         if sock is None:
@@ -364,15 +654,25 @@ class MpvPlayer:
         except OSError:
             pass
 
-    def _close_log(self) -> None:
-        log_file = self._log_file
-        self._log_file = None
-        if log_file is None:
-            return
-        try:
-            log_file.close()
-        except OSError:
-            pass
+    def release(self) -> None:
+        self.close()
+
+
+def _open_ipc() -> _Ipc:
+    if sys.platform == "win32":
+        from tplay.winpipe import WinPipe
+
+        return WinPipe()
+    return _UnixIpc()
+
+
+def _clear_ipc_name(name: str) -> None:
+    if sys.platform == "win32":
+        return
+    try:
+        Path(name).unlink(missing_ok=True)
+    except OSError:
+        return
 
 
 def _header_lines(headers: dict[str, str]) -> tuple[str | None, list[str]]:
