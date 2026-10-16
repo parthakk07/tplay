@@ -14,8 +14,8 @@ A Spotify playlist plays those songs from YouTube.
 
   tplay
 
-Install that command once, from this folder:
-  ./install
+First time, one command:
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/parthakk07/tplay/main/install)"
 
 mpv has to be installed (the program that plays the audio):
   sudo apt install mpv

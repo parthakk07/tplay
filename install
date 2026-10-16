@@ -1,27 +1,37 @@
 #!/usr/bin/env bash
-# Put the tplay command on PATH. After this, type: tplay
+# One command: install anything missing, then open tplay.
 set -euo pipefail
-cd "$(dirname "$0")"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "python3 is not installed." >&2
+export PATH="${HOME}/.local/bin:${PATH}"
+
+missing=()
+command -v python3 >/dev/null 2>&1 || missing+=(python3)
+command -v pipx >/dev/null 2>&1 || missing+=(pipx)
+command -v mpv >/dev/null 2>&1 || missing+=(mpv)
+command -v git >/dev/null 2>&1 || missing+=(git)
+if ((${#missing[@]})); then
+  sudo apt update
+  sudo DEBIAN_FRONTEND=noninteractive apt install -y "${missing[@]}"
+fi
+
+if ! command -v tplay >/dev/null 2>&1; then
+  here=""
+  src="${BASH_SOURCE[0]:-}"
+  if [[ -n "${src}" && -f "${src}" ]]; then
+    here="$(cd "$(dirname "${src}")" && pwd)"
+  fi
+  if [[ -n "${here}" && -f "${here}/pyproject.toml" ]]; then
+    pipx install --force --editable "${here}"
+  else
+    pipx install --force "git+https://github.com/parthakk07/tplay.git"
+  fi
+  pipx ensurepath >/dev/null 2>&1 || true
+  export PATH="${HOME}/.local/bin:${PATH}"
+fi
+
+if ! command -v tplay >/dev/null 2>&1; then
+  echo "tplay is installed. Open a new terminal and type: tplay" >&2
   exit 1
 fi
 
-if ! command -v pipx >/dev/null 2>&1; then
-  echo "pipx is not installed. Install it, then run ./install again:" >&2
-  echo "  sudo apt install pipx" >&2
-  echo "  pipx ensurepath" >&2
-  exit 1
-fi
-
-if ! command -v mpv >/dev/null 2>&1; then
-  echo "mpv is not installed. Install it first, for example:" >&2
-  echo "  sudo apt install mpv" >&2
-  exit 1
-fi
-
-pipx install --force --editable .
-echo
-echo "Installed. Open the player from any terminal with:"
-echo "  tplay"
+exec tplay

@@ -6,24 +6,13 @@ A Spotify playlist plays those songs from YouTube (up to 50). A YouTube playlist
 
 ## Install
 
-You need Python 3.11 or newer, pipx, and mpv.
+One command. It installs what is missing, then opens the player. The first time, it may ask for your password.
 
 ```bash
-sudo apt install python3 pipx mpv
-pipx ensurepath
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/parthakk07/tplay/main/install)"
 ```
 
-Open a new terminal after `pipx ensurepath`, then:
-
-```bash
-git clone https://github.com/parthakk07/tplay.git
-cd tplay
-./install
-```
-
-`./install` puts `tplay` on your PATH. Leave the cloned folder where it is. The command runs from that folder.
-
-From any terminal:
+After that, start it from any terminal with:
 
 ```bash
 tplay
