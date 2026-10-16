@@ -15,6 +15,7 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.widgets import Input, ListView, Static
 
+from tplay import glyphs
 from tplay.models import Stream, Track, art_color, format_duration, short_error
 from tplay.player import DeadPlayer, MpvPlayer, PlaybackSnapshot
 from tplay.source import YouTubeSource, classify_query
@@ -489,7 +490,7 @@ class TPlayApp(App[None]):
         self.queue_index: int | None = None
         self.shuffle = False
         self.loop = "off"
-        self._loop_label = "↻"
+        self._loop_label = glyphs.glyph("↻", "RP")
         self._order: list[int] = []
         self.current: Track | None = None
         self.loading = False
@@ -796,11 +797,11 @@ class TPlayApp(App[None]):
         generation = self._search_generation
         kind = classify_query(query)
         if kind == "search":
-            self._set_status("Searching…")
+            self._set_status(f"Searching{glyphs.glyph('…', '...')}")
             work = partial(self._search_worker, query, generation)
             name = "search"
         else:
-            self._set_status("Opening link…")
+            self._set_status(f"Opening link{glyphs.glyph('…', '...')}")
             work = partial(self._link_worker, query, generation, kind)
             name = "link"
         self.run_worker(
@@ -830,7 +831,8 @@ class TPlayApp(App[None]):
             return
         self.results = tracks
         if tracks:
-            self._set_status(f"{len(tracks)} results  ·  streamed, nothing saved")
+            dot = glyphs.glyph("·", ".")
+            self._set_status(f"{len(tracks)} results  {dot}  streamed, nothing saved")
         else:
             self._set_status("No matches")
         self.call_later(self._show_search_results)
@@ -876,7 +878,7 @@ class TPlayApp(App[None]):
         else:
             note = f"Queued {tracks[0].title}"
         if tracks[0].query and not tracks[0].video_id:
-            note += "  ·  streaming from YouTube"
+            note += f"  {glyphs.glyph('·', '.')}  streaming from YouTube"
         if not self._playback_active():
             pick = start
             if self.shuffle and count > 1:
@@ -885,7 +887,7 @@ class TPlayApp(App[None]):
                 self._build_order(pick)
             self.queue_index = pick
             self._begin_playback(self.queue[pick])
-            note = "Playing · " + note
+            note = f"Playing {glyphs.glyph('·', '.')} " + note
         elif self.shuffle:
             self._insert_upcoming(start, count)
         self._set_status(note)
@@ -1111,21 +1113,21 @@ class TPlayApp(App[None]):
         if self.current is None:
             title.update("Nothing playing")
             artist.update("Search for a song to start")
-            self._paint_cover(big, "♫", "#282828", "#ffffff")
+            self._paint_cover(big, glyphs.glyph("♫", "*"), "#282828", "#ffffff")
             now_title.update("Nothing playing")
             now_artist.update("Search for a song and press enter")
             self.query_one("#up-next", Static).update("Nothing queued yet")
             return
         track = self.current
         color = art_color(track.video_id or f"{track.artist} {track.title}")
-        letter = track.title[:1].upper() or "♫"
+        letter = track.title[:1].upper() or glyphs.glyph("♫", "*")
         title.update(track.title)
         if self.loading:
-            artist.update("Opening stream…")
+            artist.update(f"Opening stream{glyphs.glyph('…', '...')}")
         else:
             position = ""
             if self.queue_index is not None and self.queue:
-                position = f"   ·   {self.queue_index + 1} of {len(self.queue)}"
+                position = f"   {glyphs.glyph('·', '.')}   {self.queue_index + 1} of {len(self.queue)}"
             artist.update(f"{track.artist}{position}")
         self._paint_cover(big, letter, color, "#ffffff")
         now_title.update(track.title)
@@ -1179,7 +1181,7 @@ class TPlayApp(App[None]):
             and not snapshot.paused
             and not snapshot.idle
         )
-        label = "❚❚" if playing else "▶"
+        label = glyphs.glyph("❚❚", "||") if playing else glyphs.glyph("▶", ">")
         if label == self._play_label:
             return
         self._play_label = label
@@ -1191,7 +1193,7 @@ class TPlayApp(App[None]):
     def _paint_loop(self) -> None:
         button = self.query_one("#btn-loop", Static)
         button.set_class(self.loop != "off", "on")
-        label = "1" if self.loop == "one" else "↻"
+        label = "1" if self.loop == "one" else glyphs.glyph("↻", "RP")
         if label != self._loop_label:
             self._loop_label = label
             button.update(label)

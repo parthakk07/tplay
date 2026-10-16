@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from tplay import glyphs
 from tplay.app import TPlayApp
 from tplay.models import Stream, Track, clean_artist, format_duration
 from tplay.player import (
@@ -313,7 +314,8 @@ async def test_search_play_volume_and_queue(tmp_path: Path) -> None:
         assert "Opening stream" in str(app.query_one("#track-artist").content) or app.loading or player.loads
 
         app._tick()
-        assert app.query_one("#btn-play").content == "❚❚" or str(app.query_one("#btn-play").content) == "❚❚"
+        pause = glyphs.glyph("❚❚", "||")
+        assert app.query_one("#btn-play").content == pause or str(app.query_one("#btn-play").render()) == pause or pause in str(app.query_one("#btn-play").render())
 
         await pilot.press("+")
         assert app.volume == 85
@@ -361,6 +363,84 @@ async def test_search_play_volume_and_queue(tmp_path: Path) -> None:
         assert "+" in search.value
 
 
+@pytest.mark.asyncio
+async def test_missing_glyphs_use_ascii_without_changing_the_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(glyphs, "_forced", "plain")
+    app = _app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert "SH" in str(app.query_one("#btn-shuffle").render())
+        assert "|<" in str(app.query_one("#btn-prev").render())
+        assert ">" in str(app.query_one("#btn-play").render())
+        assert ">|" in str(app.query_one("#btn-next").render())
+        assert "RP" in str(app.query_one("#btn-loop").render())
+        assert "⏮" not in str(app.query_one("#btn-prev").render())
+        assert "⏭" not in str(app.query_one("#btn-next").render())
+        assert "Search" in str(app.query_one("#nav-search").render())
+        assert app.query_one("#btn-shuffle").action_name == "toggle_shuffle"
+        assert app.query_one("#btn-prev").action_name == "previous_track"
+        assert app.query_one("#btn-play").action_name == "toggle_pause"
+        assert app.query_one("#btn-next").action_name == "next_track"
+        assert app.query_one("#btn-loop").action_name == "toggle_loop"
+        bound = {(binding.key, binding.action) for binding in TPlayApp.BINDINGS}
+        assert ("s", "toggle_shuffle") in bound
+        assert ("r", "toggle_loop") in bound
+        assert ("n", "next_track") in bound
+        assert ("p", "previous_track") in bound
+        assert ("space", "toggle_pause") in bound
+        await pilot.click("#btn-shuffle")
+        await pilot.pause()
+        assert app.shuffle is True
+        assert "on" in app.query_one("#btn-shuffle").classes
+        assert app.query_one("#btn-shuffle").styles.background.hex.lower() == "#1db954"
+        await pilot.click("#btn-loop")
+        await pilot.pause()
+        assert app.loop == "all"
+        assert "RP" in str(app.query_one("#btn-loop").render())
+        assert app.query_one("#btn-loop").styles.background.hex.lower() == "#1db954"
+        await pilot.click("#btn-loop")
+        await pilot.pause()
+        assert app.loop == "one"
+        assert "1" in str(app.query_one("#btn-loop").render())
+        assert app.query_one("#btn-loop").styles.background.hex.lower() == "#1db954"
+
+
+def test_glyph_follows_the_font_and_a_forced_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TPLAY_ASCII", raising=False)
+    monkeypatch.delenv("TPLAY_GLYPHS", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(glyphs, "_forced", "plain")
+    assert glyphs.glyph("⇄", "SH") == "SH"
+    monkeypatch.setattr(glyphs, "_forced", "fancy")
+    assert glyphs.glyph("⏮", "|<") == "⏮"
+    monkeypatch.setattr(glyphs, "_forced", None)
+    monkeypatch.setattr(glyphs, "_coverage_loaded", True)
+    monkeypatch.setattr(glyphs, "_coverage", {ord("▶"), ord("⇄"), ord("↻"), ord("❚")})
+    assert glyphs.glyph("▶", ">") == "▶"
+    assert glyphs.glyph("❚❚", "||") == "❚❚"
+    assert glyphs.glyph("⏮", "|<") == "|<"
+    assert glyphs.glyph("⏭", ">|") == ">|"
+    monkeypatch.setenv("TERM", "dumb")
+    assert glyphs.glyph("▶", ">") == ">"
+    monkeypatch.setenv("TERM", "xterm-256color")
+    font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
+    if font.is_file():
+        covered = glyphs._cmap_codepoints(str(font))
+        assert covered is not None
+        assert ord("▶") in covered
+        assert ord("⇄") in covered
+        assert ord("⏮") not in covered
+        assert ord("⏭") not in covered
+        monkeypatch.setattr(glyphs, "_coverage_loaded", True)
+        monkeypatch.setattr(glyphs, "_coverage", covered)
+        assert glyphs.glyph("▶", ">") == "▶"
+        assert glyphs.glyph("⇄", "SH") == "⇄"
+        assert glyphs.glyph("⏮", "|<") == "|<"
+        assert glyphs.glyph("⏭", ">|") == ">|"
+
+
 def test_scrollbar_is_a_single_thin_line() -> None:
     from rich.color import Color
 
@@ -375,11 +455,12 @@ def test_scrollbar_is_a_single_thin_line() -> None:
         bar_color=Color.parse("#6a6a6a"),
     )
     text = "".join(segment.text for segment in bar.segments)
-    assert "│" in text
+    stroke = glyphs.glyph("│", "|")
+    assert stroke in text
     assert " " in text
     for chunky in "▁▂▃▄▅▆▇█▌▍":
         assert chunky not in text
-    styles = [segment.style for segment in bar.segments if segment.text and "│" in segment.text]
+    styles = [segment.style for segment in bar.segments if segment.text and stroke in segment.text]
     assert styles
     assert not any(style.reverse for style in styles)
 
@@ -399,7 +480,7 @@ async def test_long_list_scrolls_on_a_thin_line(tmp_path: Path) -> None:
         shot = tmp_path / "list.svg"
         app.save_screenshot(str(shot))
         svg = shot.read_text(encoding="utf-8")
-        assert "│" in svg
+        assert glyphs.glyph("│", "|") in svg
         for chunky in "▁▂▃▄▅▆▇":
             assert chunky not in svg
 
@@ -813,9 +894,11 @@ async def test_control_boxes_are_ascii_and_clickable(tmp_path: Path) -> None:
         app._on_mpv({"event": "playback-restart"})
         app._tick()
         await pilot.pause()
-        assert "❚❚" in str(app.query_one("#btn-play").render())
-        assert "⇄" in str(app.query_one("#btn-shuffle").render())
-        assert "↻" in str(app.query_one("#btn-loop").render())
+        assert glyphs.glyph("❚❚", "||") in str(app.query_one("#btn-play").render())
+        assert glyphs.glyph("⇄", "SH") in str(app.query_one("#btn-shuffle").render())
+        assert glyphs.glyph("⏮", "|<") in str(app.query_one("#btn-prev").render())
+        assert glyphs.glyph("⏭", ">|") in str(app.query_one("#btn-next").render())
+        assert glyphs.glyph("↻", "RP") in str(app.query_one("#btn-loop").render())
         await pilot.click("#btn-next")
         await _settle(app, pilot)
         assert app.queue_index == 1
@@ -824,7 +907,7 @@ async def test_control_boxes_are_ascii_and_clickable(tmp_path: Path) -> None:
         assert app.query_one("#btn-shuffle").styles.background.hex.lower() == "#1db954"
         await pilot.click("#btn-loop")
         assert app.loop == "all"
-        assert "↻" in str(app.query_one("#btn-loop").render())
+        assert glyphs.glyph("↻", "RP") in str(app.query_one("#btn-loop").render())
         assert app.query_one("#btn-loop").styles.background.hex.lower() == "#1db954"
         await pilot.click("#btn-loop")
         assert app.loop == "one"

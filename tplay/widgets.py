@@ -19,6 +19,7 @@ from textual.scrollbar import ScrollBar, ScrollBarRender
 from textual.widget import Widget
 from textual.widgets import Input, ListItem, ListView, Static
 
+from tplay import glyphs
 from tplay.models import Track
 
 # Short enough that holding j/k stays with the highlight, long enough to glide.
@@ -43,7 +44,7 @@ class ThinScrollBarRender(ScrollBarRender):
         width = thickness if vertical else 1
         blank = " " * width
         # A box-drawing stroke, the same on every row, so the thumb is one line.
-        stroke = ("│" if vertical else "─") * width
+        stroke = (glyphs.glyph("│", "|") if vertical else glyphs.glyph("─", "-")) * width
         size_i = max(0, int(size))
         if (
             size_i
@@ -228,7 +229,7 @@ class TrackItem(ListItem):
         self._playing = playing
 
     def compose(self) -> ComposeResult:
-        mark = "▶" if self._playing else f"{self.number:>2}"
+        mark = glyphs.glyph("▶", ">") if self._playing else f"{self.number:>2}"
         yield Static(mark, classes="marker", markup=False)
         with Vertical(classes="track-text"):
             yield Static(self.track.title, classes="title", markup=False)
@@ -246,7 +247,7 @@ class TrackItem(ListItem):
             marker = self.query_one(".marker", Static)
         except NoMatches:
             return
-        marker.update("▶" if playing else f"{self.number:>2}")
+        marker.update(glyphs.glyph("▶", ">") if playing else f"{self.number:>2}")
 
 
 class SeekBar(Static):
@@ -262,14 +263,15 @@ class SeekBar(Static):
 
     def render(self) -> RenderResult:
         width = max(1, self.size.width)
+        bar = glyphs.glyph("━", "-")
         if not self.active:
-            return Text("━" * width, style="#3e3e3e")
+            return Text(bar * width, style="#3e3e3e")
         pos = round(min(1.0, max(0.0, self.fraction)) * (width - 1))
         pos = min(width - 1, max(0, pos))
         text = Text()
-        text.append("━" * pos, style="#1db954")
-        text.append("●", style="#ffffff")
-        text.append("━" * (width - pos - 1), style="#535353")
+        text.append(bar * pos, style="#1db954")
+        text.append(glyphs.glyph("●", "o"), style="#ffffff")
+        text.append(bar * (width - pos - 1), style="#535353")
         return text
 
     def on_click(self, event: Click) -> None:
@@ -298,8 +300,8 @@ class VolumeBar(Static):
         filled = min(width, max(0, filled))
         color = "#4d4d4d" if self.muted else "#1db954"
         text = Text()
-        text.append("█" * filled, style=color)
-        text.append("░" * (width - filled), style="#3e3e3e")
+        text.append(glyphs.glyph("█", "#") * filled, style=color)
+        text.append(glyphs.glyph("░", ".") * (width - filled), style="#3e3e3e")
         return text
 
     def on_click(self, event: Click) -> None:
@@ -314,7 +316,7 @@ class VolumeBox(Horizontal):
     """Volume controls. The mouse wheel adjusts the level."""
 
     def compose(self) -> ComposeResult:
-        yield ActionLabel("−", "volume_down", id="btn-vol-down", classes="vol-btn")
+        yield ActionLabel(glyphs.glyph("−", "-"), "volume_down", id="btn-vol-down", classes="vol-btn")
         yield VolumeBar(id="volume-bar")
         yield ActionLabel("+", "volume_up", id="btn-vol-up", classes="vol-btn")
         yield Static(" 80", id="volume-readout", markup=False)
@@ -331,11 +333,13 @@ class Sidebar(Vertical):
         super().__init__(id="sidebar")
 
     def compose(self) -> ComposeResult:
-        yield Static("[#1db954]♫[/]  [#ffffff]tplay[/]", id="logo")
-        yield Static("stream only  ·  no files", id="tagline", markup=False)
-        yield ActionLabel("1   ⌕   Search", "show_search", id="nav-search", classes="nav active")
-        yield ActionLabel("2   ≡   Queue", "show_queue", id="nav-queue", classes="nav")
-        yield ActionLabel("3   ♪   Now playing", "show_now", id="nav-now", classes="nav")
+        note = glyphs.glyph("♫", "*")
+        dot = glyphs.glyph("·", ".")
+        yield Static(f"[#1db954]{note}[/]  [#ffffff]tplay[/]", id="logo")
+        yield Static(f"stream only  {dot}  no files", id="tagline", markup=False)
+        yield ActionLabel(f"1   {glyphs.glyph('⌕', '/')}   Search", "show_search", id="nav-search", classes="nav active")
+        yield ActionLabel(f"2   {glyphs.glyph('≡', '=')}   Queue", "show_queue", id="nav-queue", classes="nav")
+        yield ActionLabel(f"3   {glyphs.glyph('♪', 'N')}   Now playing", "show_now", id="nav-now", classes="nav")
         yield Static(SIDEBAR_KEYS, id="sidebar-keys", markup=False)
 
 
@@ -380,11 +384,11 @@ class NowView(Vertical):
         yield Static("Now playing", classes="page-title", markup=False)
         with SmoothPane(id="now-body"):
             with Horizontal(id="art-row"):
-                yield Static("♫", id="big-art", markup=False)
+                yield Static(glyphs.glyph("♫", "*"), id="big-art", markup=False)
             yield Static("Nothing playing", id="now-title", markup=False)
             yield Static("Search for a song and press enter", id="now-artist", markup=False)
             yield Static(
-                "Streaming from YouTube  ·  nothing is saved",
+                f"Streaming from YouTube  {glyphs.glyph('·', '.')}  nothing is saved",
                 id="now-note",
                 markup=False,
             )
@@ -402,11 +406,11 @@ class PlayerBar(Vertical):
                 yield Static("Nothing playing", id="track-title", markup=False)
                 yield Static("Search for a song to start", id="track-artist", markup=False)
             with Horizontal(id="transport"):
-                yield ActionLabel("⇄", "toggle_shuffle", id="btn-shuffle", classes="transport-btn")
-                yield ActionLabel("⏮", "previous_track", id="btn-prev", classes="transport-btn")
-                yield ActionLabel("▶", "toggle_pause", id="btn-play", classes="transport-btn play")
-                yield ActionLabel("⏭", "next_track", id="btn-next", classes="transport-btn")
-                yield ActionLabel("↻", "toggle_loop", id="btn-loop", classes="transport-btn")
+                yield ActionLabel(glyphs.glyph("⇄", "SH"), "toggle_shuffle", id="btn-shuffle", classes="transport-btn")
+                yield ActionLabel(glyphs.glyph("⏮", "|<"), "previous_track", id="btn-prev", classes="transport-btn")
+                yield ActionLabel(glyphs.glyph("▶", ">"), "toggle_pause", id="btn-play", classes="transport-btn play")
+                yield ActionLabel(glyphs.glyph("⏭", ">|"), "next_track", id="btn-next", classes="transport-btn")
+                yield ActionLabel(glyphs.glyph("↻", "RP"), "toggle_loop", id="btn-loop", classes="transport-btn")
             yield VolumeBox(id="volume-box")
         with Horizontal(id="player-bottom"):
             yield Static("0:00", id="time-pos", markup=False)
