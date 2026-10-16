@@ -35,11 +35,12 @@ from tplay.source import (
     SourceError,
     YouTubeSource,
     classify_query,
+    spotify_list_duration,
     track_from_entry,
     tracks_from_info,
     tracks_from_spotify_html,
 )
-from tplay.widgets import RECOMMENDED, HelpScreen, ThinScrollBarRender, TrackItem
+from tplay.widgets import RECOMMENDED, HelpScreen, SeekBar, ThinScrollBarRender, TrackItem
 
 SAMPLE = [
     Track("dQw4w9WgXcQ", "Never Gonna Give You Up", "Rick Astley", 213),
@@ -200,6 +201,50 @@ def test_spotify_page_lists_songs_without_a_youtube_id() -> None:
     assert tracks[0].duration == 198
 
 
+_SPOTIFY_MIXED_DURATION = """
+<script id="__NEXT_DATA__" type="application/json">
+{"props":{"pageProps":{"state":{"data":{"entity":{"type":"playlist","title":"Mix","trackList":[
+{"title":"Clock","subtitle":"A","duration":"3:21"},
+{"title":"TextMs","subtitle":"B","duration":"125000"},
+{"title":"MsKey","subtitle":"C","duration_ms":61000},
+{"title":"Nested","subtitle":"D","duration":{"totalMilliseconds":45000}},
+{"title":"Gone","subtitle":"E"}
+]}}}}}}
+</script>
+"""
+
+
+def test_spotify_rows_keep_a_length_from_every_duration_shape() -> None:
+    _title, tracks, _total = tracks_from_spotify_html(_SPOTIFY_MIXED_DURATION)
+    assert [(track.title, track.duration) for track in tracks] == [
+        ("Clock", 201),
+        ("TextMs", 125),
+        ("MsKey", 61),
+        ("Nested", 45),
+        ("Gone", None),
+    ]
+    assert spotify_list_duration(_SPOTIFY_PLAYLIST) == 270
+    assert spotify_list_duration(_SPOTIFY_MIXED_DURATION) == 432
+    assert spotify_list_duration("<html>nope</html>") is None
+
+
+def test_spotify_list_duration_reads_the_embed_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get(url: str) -> tuple[str, str]:
+        assert url.endswith("/playlist/37i9dQZF1DXcBWIGoYBM5M")
+        return url, _SPOTIFY_PLAYLIST
+
+    monkeypatch.setattr("tplay.source._http_get", fake_get)
+    source = YouTubeSource()
+    assert source.list_duration("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M") == 270
+    assert source.list_duration("rick astley") is None
+
+    def broken_get(url: str) -> tuple[str, str]:
+        raise SourceError("down")
+
+    monkeypatch.setattr("tplay.source._http_get", broken_get)
+    assert source.list_duration("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M") is None
+
+
 def test_spotify_collect_reads_the_embed_page(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_get(url: str) -> tuple[str, str]:
         assert url.endswith("/playlist/37i9dQZF1DXcBWIGoYBM5M")
@@ -290,6 +335,8 @@ def test_track_parsing_skips_rows_without_a_title() -> None:
     assert tracks[0].artist == "Artist"
     assert tracks[0].duration == 12
     assert track_from_entry({"id": "x", "title": "Live", "uploader": "Band"}) is not None
+    clock = track_from_entry({"id": "y", "title": "Clock", "duration": None, "duration_string": "3:05"})
+    assert clock is not None and clock.duration == 185
 
 
 @pytest.mark.asyncio
@@ -774,6 +821,62 @@ async def test_shortcut_list_sits_at_the_bottom_left(tmp_path: Path) -> None:
         assert lines[0][0] > 0
         assert "ctrl+c" in lines[-1][1]
         assert lines[-1][0] == keys.size.height - 1
+
+
+def _length_text(item: TrackItem) -> str:
+    return str(item.query_one(".length").render()).strip()
+
+
+@pytest.mark.asyncio
+async def test_recommendation_playlists_show_a_length(tmp_path: Path) -> None:
+    source = FakeSource()
+
+    def list_duration(url: str) -> int | None:
+        if url.endswith("4sWSpwq3LiO"):
+            return None
+        if url.endswith("XUsuxWHRQd"):
+            return 9155
+        return 10021
+
+    source.list_duration = list_duration  # type: ignore[attr-defined]
+    app = _app(tmp_path, source)
+    async with app.run_test(size=(100, 36)) as pilot:
+        for _ in range(10):
+            await pilot.pause()
+            if app.query("#recommendations TrackItem"):
+                break
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        items = list(app.query("#recommendations TrackItem"))
+        by_title = {item.track.title: _length_text(item) for item in items}
+        assert by_title["Never Gonna Give You Up"] == "3:33"
+        assert by_title["Bohemian Rhapsody"] == "5:55"
+        assert by_title["Today's Top Hits"] == "2:47:01"
+        assert by_title["RapCaviar"] == "2:32:35"
+        assert by_title["Peaceful Piano"] == "--:--"
+
+
+@pytest.mark.asyncio
+async def test_player_shows_the_song_length_before_the_stream_reports_one(tmp_path: Path) -> None:
+    player = FakePlayer()
+    app = _app(tmp_path, player=player)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.current = RECOMMENDED[0]
+        player.duration = None
+        player.position = 0.0
+        app._tick()
+        await pilot.pause()
+        assert str(app.query_one("#time-dur").render()).strip() == "3:33"
+        app.on_seek_bar_sought(SeekBar.Sought(0.5))
+        assert player.seeks[-1] == pytest.approx(106.5)
+        player.duration = 200
+        player.position = 0.0
+        app._tick()
+        await pilot.pause()
+        assert str(app.query_one("#time-dur").render()).strip() == "3:20"
+        app.on_seek_bar_sought(SeekBar.Sought(0.5))
+        assert player.position == pytest.approx(100)
 
 
 @pytest.mark.asyncio

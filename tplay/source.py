@@ -66,7 +66,34 @@ def _base_options() -> dict[str, Any]:
     }
 
 
+def _clock_seconds(value: str) -> int | None:
+    """Read a length written as m:ss or h:mm:ss."""
+
+    parts = value.strip().split(":")
+    if not 2 <= len(parts) <= 3:
+        return None
+    try:
+        numbers = [int(part) for part in parts]
+    except ValueError:
+        return None
+    if any(number < 0 for number in numbers):
+        return None
+    if len(numbers) == 2:
+        hours = 0
+        minutes, seconds = numbers
+    else:
+        hours, minutes, seconds = numbers
+    if minutes >= 60 or seconds >= 60:
+        return None
+    total = hours * 3600 + minutes * 60 + seconds
+    if total <= 0:
+        return None
+    return total
+
+
 def _duration(value: object) -> int | None:
+    if isinstance(value, str) and ":" in value:
+        return _clock_seconds(value)
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -90,11 +117,14 @@ def track_from_entry(entry: dict[str, Any]) -> Track | None:
     artist = clean_artist(
         one_line(entry.get("channel") or entry.get("uploader") or entry.get("artist"), "")
     )
+    seconds = _duration(entry.get("duration"))
+    if seconds is None:
+        seconds = _duration(entry.get("duration_string"))
     return Track(
         video_id=video_id,
         title=title,
         artist=artist,
-        duration=_duration(entry.get("duration")),
+        duration=seconds,
     )
 
 
@@ -251,18 +281,58 @@ def _track_from_spotify_row(item: object) -> Track | None:
         video_id="",
         title=title,
         artist=artist,
-        duration=_milliseconds(item.get("duration")),
+        duration=_spotify_seconds(item),
         query=query,
     )
 
 
+def _spotify_seconds(item: dict[str, Any]) -> int | None:
+    """Song length from a Spotify embed row. Fields are not all the same shape."""
+
+    for key in ("duration", "duration_ms", "durationMs"):
+        if item.get(key) in (None, ""):
+            continue
+        seconds = _milliseconds(item.get(key))
+        if seconds is not None:
+            return seconds
+    return None
+
+
 def _milliseconds(value: object) -> int | None:
+    if isinstance(value, dict):
+        for key in ("totalMilliseconds", "milliseconds", "ms"):
+            if key in value:
+                return _milliseconds(value[key])
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if ":" in text:
+            return _clock_seconds(text)
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     seconds = int(value / 1000)
     if seconds <= 0:
         return None
     return seconds
+
+
+def spotify_list_duration(html: str) -> int | None:
+    """Total seconds of the songs listed on a Spotify embed page."""
+
+    try:
+        _title, tracks, _total = tracks_from_spotify_html(html, limit=10_000)
+    except SourceError:
+        return None
+    total = sum(track.duration or 0 for track in tracks)
+    if total <= 0:
+        return None
+    return total
 
 
 def _http_get(url: str) -> tuple[str, str]:
@@ -344,10 +414,26 @@ class YouTubeSource:
             total_count = None
         return title, tracks, total_count
 
+    def list_duration(self, url: str) -> int | None:
+        """Seconds in a public Spotify list. None when the page has no lengths."""
+
+        if spotify_target(url) is None:
+            return None
+        try:
+            html = self._open_spotify_embed(url)
+        except SourceError:
+            return None
+        return spotify_list_duration(html)
+
     def _collect_spotify(self, url: str, limit: int) -> tuple[str, list[Track], int | None]:
         """List songs on a public Spotify playlist, album, or track page."""
 
         limit = max(1, min(SPOTIFY_PAGE_LIMIT, limit))
+        html = self._open_spotify_embed(url)
+        title, tracks, total = tracks_from_spotify_html(html, limit)
+        return title, tracks, total
+
+    def _open_spotify_embed(self, url: str) -> str:
         target = spotify_target(url)
         if target is None:
             raise SourceError("Could not open that Spotify link")
@@ -359,8 +445,7 @@ class YouTubeSource:
                 raise SourceError("Could not open that Spotify link")
             kind, value = target
         _final, html = _http_get(f"https://open.spotify.com/embed/{kind}/{value}")
-        title, tracks, total = tracks_from_spotify_html(html, limit)
-        return title, tracks, total
+        return html
 
     def resolve(self, track: Track) -> Stream:
         """Return a direct audio URL. yt-dlp is called with download=False."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from math import ceil
 
 from rich.color import Color
@@ -248,6 +249,17 @@ class TrackItem(ListItem):
         except NoMatches:
             return
         marker.update(glyphs.glyph("▶", ">") if playing else f"{self.number:>2}")
+
+    def set_duration(self, seconds: int) -> None:
+        """Fill a length that was unknown when the row was built."""
+
+        if self.track.duration or seconds <= 0:
+            return
+        self.track = replace(self.track, duration=seconds)
+        try:
+            self.query_one(".length", Static).update(self.track.duration_text)
+        except NoMatches:
+            return
 
 
 class SeekBar(Static):

@@ -691,8 +691,29 @@ class TPlayApp(App[None]):
 
     def on_seek_bar_sought(self, event: SeekBar.Sought) -> None:
         event.stop()
-        if self.player is not None:
+        if self.player is None:
+            return
+        snapshot = self.player.snapshot()
+        if snapshot.duration and snapshot.duration > 0:
             self.player.seek_ratio(event.ratio)
+            return
+        duration = self._known_duration(snapshot)
+        if duration is None:
+            return
+        bounded = min(1.0, max(0.0, event.ratio))
+        target = min(max(0.0, duration - 0.25), bounded * duration)
+        self.player.seek_relative(target - (snapshot.position or 0.0))
+
+    def _known_duration(self, snapshot: PlaybackSnapshot) -> float | None:
+        """Prefer the stream length, then the length already stored on the song."""
+
+        reported = snapshot.duration
+        if reported is not None and reported > 0:
+            return float(reported)
+        track = self.current
+        if track is not None and track.duration is not None and track.duration > 0:
+            return float(track.duration)
+        return None
 
     def on_volume_bar_changed(self, event: VolumeBar.Changed) -> None:
         event.stop()
@@ -1162,7 +1183,7 @@ class TPlayApp(App[None]):
 
     def _paint_progress(self, snapshot: PlaybackSnapshot) -> None:
         position = snapshot.position or 0.0
-        duration = snapshot.duration
+        duration = self._known_duration(snapshot)
         active = self.current is not None and duration is not None and duration > 0
         fraction = 0.0
         if active and duration:
@@ -1308,6 +1329,52 @@ class TPlayApp(App[None]):
             if items:
                 await view.extend(items)
             self._update_empty_states()
+        self._fill_recommendation_lengths()
+
+    def _fill_recommendation_lengths(self) -> None:
+        """Playlist rows have no single-song length until the page is read."""
+
+        reader = getattr(self.source, "list_duration", None)
+        if reader is None:
+            return
+        queries = [
+            track.query
+            for track in RECOMMENDED
+            if not track.duration and classify_query(track.query) != "search" and track.query
+        ]
+        if not queries:
+            return
+        self.run_worker(
+            partial(self._recommendation_length_worker, queries),
+            thread=True,
+            exclusive=False,
+            group="recommend-length",
+            exit_on_error=False,
+            name="recommend-length",
+        )
+
+    def _recommendation_length_worker(self, queries: list[str]) -> None:
+        reader = getattr(self.source, "list_duration", None)
+        if reader is None:
+            return
+        found: list[tuple[str, int]] = []
+        for query in queries:
+            try:
+                seconds = reader(query)
+            except Exception:
+                continue
+            if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds <= 0:
+                continue
+            found.append((query, seconds))
+        if found:
+            self._deliver(self._apply_recommendation_lengths, 0, found)
+
+    def _apply_recommendation_lengths(self, _generation: int, found: list[tuple[str, int]]) -> None:
+        by_query = dict(found)
+        for item in self.query("#recommendations TrackItem"):
+            seconds = by_query.get(item.track.query)
+            if seconds:
+                item.set_duration(seconds)
 
     async def _mount_queue_list(self) -> None:
         await self._mount_tracks("#queue-list", self.queue)
